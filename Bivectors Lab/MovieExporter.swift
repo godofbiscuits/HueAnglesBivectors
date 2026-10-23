@@ -2,23 +2,53 @@
 //  MovieExporter.swift
 //  Bivectors Lab
 //
-//  Renders the hue rotation to a movie: one frame per degree at 30 fps. Each frame is the three live panes
+//  Renders the hue rotation to a movie: half a degree per frame at 60 fps. Each frame is the three live panes
 //  side by side (original | hue-altered, luminance preserved | luminance diff), written with the
 //  least-compressed encoder available (ProRes 422 HQ, falling back to maximum-quality HEVC).
 //
 
 import AVFoundation
+import CoreGraphics
 import CoreMedia
+import CoreText
 import CoreVideo
 
+/// Where in a movie the mean luminance difference was largest.
+nonisolated struct MoviePeak: Sendable, Equatable {
+    /// Zero-based index of the frame (the earliest, if several tie).
+    let frame: Int
+    /// The hue angle of that frame, in degrees, 0..<360.
+    let angleDegrees: Double
+    /// The mean luminance difference on that frame, in gamma-encoded 8-bit units (0...255).
+    let meanError: Double
+    let frameCount: Int
+    let framesPerSecond: Int32
+
+    /// When that frame plays, in seconds from the start of the movie.
+    var timeSeconds: Double { Double(frame) / Double(framesPerSecond) }
+
+    /// `degrees` brought into 0..<360.
+    static func normalizedAngle(_ degrees: Double) -> Double {
+        var angle = degrees.truncatingRemainder(dividingBy: 360)
+        if angle < 0 { angle += 360 }
+        return angle
+    }
+}
+
+nonisolated struct ExportResult: Sendable {
+    let url: URL
+    /// nil only if the movie had no frames.
+    let peak: MoviePeak?
+}
+
 /// The project defaults every type to the main actor, so this is explicitly `nonisolated`, and `export` is
-/// `@concurrent`: rendering 360 frames must never run on (and freeze) the main thread.
+/// `@concurrent`: rendering hundreds of frames must never run on (and freeze) the main thread.
 nonisolated enum MovieExporter {
     struct Settings: Sendable {
-        /// 360 frames at one degree each is one full rotation.
-        var frameCount = 360
-        var framesPerSecond: Int32 = 30
-        var degreesPerFrame = 1.0
+        /// 720 frames at half a degree each is one full rotation; at 60 fps that's 12 seconds.
+        var frameCount = 720
+        var framesPerSecond: Int32 = 60
+        var degreesPerFrame = 0.5
         /// Gain applied to the luminance-diff pane, matching the on-screen diff.
         var diffGain: Float = 16
     }
@@ -39,17 +69,24 @@ nonisolated enum MovieExporter {
         }
     }
 
-    /// Renders the movie and returns the file URL (in the temporary directory). Cancelling the calling task
-    /// stops the export and deletes the partial file.
+    /// Renders the movie and returns its file URL (in the temporary directory) and where its peak difference
+    /// fell. Cancelling the calling task stops the export and deletes the partial file.
     ///
     /// Frame `n` uses hue angle `adjustment.deltaThetaDegrees + n · degreesPerFrame`; the adjustment's lightness
     /// and chroma scales are held constant. `progress` is called with 0...1 as frames are written.
+    ///
+    /// The caption on each frame's diff pane shows that frame's mean luminance difference and the peak of that
+    /// mean from the first frame up to and including this one, so the last frame shows the peak for the whole
+    /// rotation. `frameDiff`, if given, receives the same (mean, peak) pair for every frame.
+    ///
+    /// The result also reports which frame (and hue angle) had the largest mean difference.
     @concurrent static func export(
         source: RGBAF16Image,
         adjustment: OklabAdjustment,
         settings: Settings = Settings(),
+        frameDiff: (@Sendable (_ mean: Double, _ peak: Double) -> Void)? = nil,
         progress: @escaping @Sendable (Double) -> Void = { _ in }
-    ) async throws -> URL {
+    ) async throws -> ExportResult {
         // Video dimensions must be even.
         let paneWidth = source.width & ~1
         let paneHeight = source.height & ~1
@@ -77,6 +114,9 @@ nonisolated enum MovieExporter {
         }
         writer.startSession(atSourceTime: .zero)
 
+        // Frames are rendered in order, so this is the peak mean difference from frame 0 up to the current frame.
+        var peakTracker = PeakTracker()
+
         do {
             for frame in 0..<settings.frameCount {
                 try Task.checkCancellation()
@@ -89,7 +129,7 @@ nonisolated enum MovieExporter {
 
                 let plainImage = OklabRotor.apply(plain, to: source).image
                 let preservedImage = OklabRotor.apply(preserved, to: source).image
-                let diffImage = OklabRotor.differenceMap(plainImage, preservedImage, gain: settings.diffGain).image
+                let diff = OklabRotor.differenceMap(plainImage, preservedImage, gain: settings.diffGain)
 
                 guard let pool = adaptor.pixelBufferPool else { throw ExportError.cannotCreateFrame }
                 var created: CVPixelBuffer?
@@ -105,7 +145,15 @@ nonisolated enum MovieExporter {
                 let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
                 encodeBGRA8(source, width: paneWidth, height: paneHeight, into: bytes, bytesPerRow: rowBytes, xOffset: 0)
                 encodeBGRA8(preservedImage, width: paneWidth, height: paneHeight, into: bytes, bytesPerRow: rowBytes, xOffset: paneWidth)
-                encodeBGRA8(diffImage, width: paneWidth, height: paneHeight, into: bytes, bytesPerRow: rowBytes, xOffset: paneWidth * 2)
+                encodeBGRA8(diff.image, width: paneWidth, height: paneHeight, into: bytes, bytesPerRow: rowBytes, xOffset: paneWidth * 2)
+                // Write this frame's mean luminance difference, and the peak so far, on the diff pane.
+                let runningPeak = peakTracker.record(diff.meanError, at: frame)
+                frameDiff?(diff.meanError, runningPeak)
+                drawCaption(
+                    DifferenceMap.caption(mean: diff.meanError, peak: runningPeak),
+                    into: bytes, bytesPerRow: rowBytes, frameWidth: frameWidth, frameHeight: paneHeight,
+                    pane: CGRect(x: paneWidth * 2, y: 0, width: paneWidth, height: paneHeight)
+                )
                 CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
 
                 while !input.isReadyForMoreMediaData {
@@ -133,7 +181,17 @@ nonisolated enum MovieExporter {
             try? FileManager.default.removeItem(at: url)
             throw ExportError.writerFailed(writer.error?.localizedDescription ?? "unknown error")
         }
-        return url
+
+        let peak = peakTracker.peakIndex.map { frame in
+            MoviePeak(
+                frame: frame,
+                angleDegrees: MoviePeak.normalizedAngle(adjustment.deltaThetaDegrees + Double(frame) * settings.degreesPerFrame),
+                meanError: peakTracker.peak,
+                frameCount: settings.frameCount,
+                framesPerSecond: settings.framesPerSecond
+            )
+        }
+        return ExportResult(url: url, peak: peak)
     }
 
     /// Picks the least-compressed encoder the writer accepts: ProRes 422 HQ, else maximum-quality HEVC.
@@ -174,6 +232,52 @@ nonisolated enum MovieExporter {
     }
 
     // MARK: Pixel conversion
+
+    /// Draws `text` in white on a translucent dark plate at the bottom-left of `pane`, directly into BGRA8 frame
+    /// memory (as written by `encodeBGRA8`). `pane` is in pixels with the origin at the bottom-left; text is
+    /// clipped to it.
+    static func drawCaption(
+        _ text: String,
+        into base: UnsafeMutablePointer<UInt8>,
+        bytesPerRow: Int,
+        frameWidth: Int,
+        frameHeight: Int,
+        pane: CGRect
+    ) {
+        // premultipliedFirst + 32-bit little-endian is BGRA in memory, matching the pixel buffer.
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: base, width: frameWidth, height: frameHeight, bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+                  space: space,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+              ) else { return }
+        context.clip(to: pane)
+
+        let fontSize = max(10, min(pane.height * 0.05, pane.width * 0.04))
+        let font = CTFontCreateWithName("Menlo-Bold" as CFString, fontSize, nil)
+        let attributes: [CFString: Any] = [
+            kCTFontAttributeName: font,
+            kCTForegroundColorAttributeName: CGColor(gray: 1, alpha: 1),
+        ]
+        guard let attributed = CFAttributedStringCreate(nil, text as CFString, attributes as CFDictionary) else { return }
+        let line = CTLineCreateWithAttributedString(attributed)
+        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+
+        let margin = pane.height * 0.02
+        let padding = fontSize * 0.4
+        // Baseline position that puts the plate's bottom edge exactly `margin` above the pane's bottom.
+        let origin = CGPoint(x: pane.minX + margin + padding, y: pane.minY + margin + padding - bounds.minY)
+        let plate = CGRect(
+            x: origin.x - padding, y: origin.y + bounds.minY - padding,
+            width: bounds.width + 2 * padding, height: bounds.height + 2 * padding
+        )
+        context.setFillColor(CGColor(gray: 0, alpha: 0.6))
+        context.addPath(CGPath(roundedRect: plate, cornerWidth: padding, cornerHeight: padding, transform: nil))
+        context.fillPath()
+
+        context.textPosition = origin
+        CTLineDraw(line, context)
+    }
 
     /// sRGB encode of linear 0...1, quantized to 8 bits, indexed by `round(linear * 65535)`.
     private static let encodeTable: [UInt8] = (0...65535).map { index in

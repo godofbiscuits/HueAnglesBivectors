@@ -450,4 +450,37 @@ nonisolated struct DifferenceMap: Sendable {
     /// Maximum / mean absolute luminance difference, in gamma-encoded 8-bit units (0...255).
     let maxError: Double
     let meanError: Double
+
+    /// The text shown in the diff pane and burned into movie frames: this frame's mean luminance difference and
+    /// the peak that mean has reached so far. Gain-independent: these are the true differences, not the
+    /// amplified ones the image displays.
+    static func caption(mean: Double, peak: Double) -> String {
+        String(format: "ΔY mean %.2f  peak %.2f  (of 255)", mean, peak)
+    }
+}
+
+/// Tracks the largest value seen: each new value replaces the peak only if it is larger, and the index of the
+/// sample that set the peak is kept (the earliest one, if several tie).
+nonisolated struct PeakTracker: Sendable {
+    private(set) var peak = 0.0
+    /// The `index` passed with the sample that set the peak, if any index was given.
+    private(set) var peakIndex: Int?
+
+    /// Records `value` (optionally labelled with the `index` of its sample) and returns the peak so far.
+    @discardableResult
+    mutating func record(_ value: Double, at index: Int? = nil) -> Double {
+        if value > peak {
+            peak = value
+            peakIndex = index
+        } else if peakIndex == nil {
+            // Nothing has beaten the starting peak of 0 yet; the first sample stands in for it.
+            peakIndex = index
+        }
+        return peak
+    }
+
+    mutating func reset() {
+        peak = 0
+        peakIndex = nil
+    }
 }

@@ -64,7 +64,7 @@ struct ContentView: View {
             model.adjustmentChanged()
         }
         .onChange(of: model.diffGain) {
-            model.diffGainChanged()
+            model.diffGainEdited()
         }
         .onChange(of: model.finishedMovieURL) { _, url in
             guard let url else { return }
@@ -131,7 +131,11 @@ struct ContentView: View {
     private var imagePanes: some View {
         pane("Original", image: model.originalImage)
         pane("Hue-altered, luminance preserved", image: model.preservedImage)
-        pane("Luminance diff ×\(Int(model.diffGain)): hue-altered vs preserved", image: model.diffImage)
+        pane(
+            "Luminance diff ×\(Int(model.diffGain)): hue-altered vs preserved",
+            image: model.diffImage,
+            caption: DifferenceMap.caption(mean: model.diffMeanError, peak: model.diffPeakMeanError)
+        )
         if let restored = model.restoredImage {
             pane("Restored: hue-altered", image: restored)
         }
@@ -140,7 +144,8 @@ struct ContentView: View {
         }
     }
 
-    private func pane(_ title: String, image: CGImage?) -> some View {
+    /// One image pane. `caption`, if given, is written on the image itself (bottom-left), like the movie does.
+    private func pane(_ title: String, image: CGImage?, caption: String? = nil) -> some View {
         VStack(spacing: 6) {
             Text(title)
                 .font(.headline)
@@ -150,6 +155,19 @@ struct ContentView: View {
                 Image(decorative: image, scale: 1)
                     .resizable()
                     .scaledToFit()
+                    .overlay(alignment: .bottomLeading) {
+                        if let caption {
+                            Text(caption)
+                                .font(.system(.callout, design: .monospaced).bold())
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.5)
+                                .foregroundStyle(.white)
+                                .padding(6)
+                                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+                                .padding(6)
+                        }
+                    }
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -172,27 +190,55 @@ struct ContentView: View {
                     model.toggleAnimation()
                 }
                 .help("Rotate the hue angle through a full 360° in \(Int(HueLabModel.animationSeconds)) seconds")
-                Button(model.isMakingMovie ? "Cancel" : "Movie",
-                       systemImage: model.isMakingMovie ? "xmark.circle" : "film") {
-                    if model.isMakingMovie { model.cancelMovie() } else { model.makeMovie() }
+                Button("Movie", systemImage: movieButtonIcon) {
+                    model.playMovie()
                 }
-                .help("Render a 30 fps movie that steps the hue angle 1° per frame (360 frames), then play it")
+                .disabled(model.openMovieWhenReady)
+                .help(model.movieURL != nil
+                      ? "Play the 60 fps movie that steps the hue angle 0.5° per frame"
+                      : "The movie is made automatically; click to play it as soon as it's ready")
             }
-            if model.isMakingMovie {
-                VStack(spacing: 2) {
-                    ProgressView(value: model.movieProgress)
-                    Text("Rendering movie… \(Int(model.movieProgress * 100))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                .frame(width: 190)
-            }
+            movieStatus
             if let message = model.movieErrorMessage {
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(.red)
                     .frame(width: 190)
             }
+        }
+    }
+
+    private var movieButtonIcon: String {
+        if model.movieURL != nil { return "play.rectangle.fill" }
+        if model.isMakingMovie || model.isMoviePending || model.openMovieWhenReady { return "hourglass" }
+        return "film"
+    }
+
+    /// What the automatically generated movie is doing, under the dial.
+    @ViewBuilder
+    private var movieStatus: some View {
+        if model.isMakingMovie {
+            VStack(spacing: 2) {
+                ProgressView(value: model.movieProgress)
+                Text("Rendering movie… \(Int(model.movieProgress * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 190)
+        } else if model.isMoviePending {
+            Text("Movie out of date; it will re-render when you stop adjusting")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 190)
+        } else if model.movieURL != nil {
+            Text("Movie ready")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if model.openMovieWhenReady {
+            Text("Will play when ready")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -219,6 +265,7 @@ struct ContentView: View {
             Button("Reset", systemImage: "arrow.counterclockwise") {
                 model.stopAnimation()
                 model.adjustment.resetValues()
+                model.resetPeak()
             }
             .disabled(model.adjustment.isIdentity)
 
@@ -264,8 +311,21 @@ struct ContentView: View {
                 .font(.callout.monospacedDigit())
             Text("  hue-altered \(model.adjustedMeanLuminance, specifier: "%.4f"), luminance preserved \(model.preservedMeanLuminance, specifier: "%.4f")")
                 .font(.callout.monospacedDigit())
-            Text("Luminance diff, hue-altered vs preserved: max \(model.diffMaxError, specifier: "%.2f"), mean \(model.diffMeanError, specifier: "%.3f") (8-bit units)")
+            Text("Luminance diff, hue-altered vs preserved: mean \(model.diffMeanError, specifier: "%.3f"), peak \(model.diffPeakMeanError, specifier: "%.3f") (8-bit units)")
                 .font(.callout.monospacedDigit())
+            // Where the luminance difference peaks over the whole rotation. A quick sweep finds it within about a
+            // second; once the movie's frames have all been generated, its own measurement replaces that.
+            if let peak = model.moviePeak ?? model.predictedPeak {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("\(model.moviePeak != nil ? "Movie peak" : "Peak (quick sweep)"): ΔY \(peak.meanError, specifier: "%.2f") at hue \(peak.angleDegrees, specifier: "%.1f")°")
+                    Text("  frame \(peak.frame + 1) of \(peak.frameCount) (\(peak.timeSeconds, specifier: "%.2f") s)")
+                }
+                .font(.callout.monospacedDigit().bold())
+            } else if model.isFindingPeak {
+                Text("Finding the peak…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             Text("Outside sRGB gamut (kept): \(model.outOfGamut) hue-altered, \(model.preservedOutOfGamut) preserved")
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
