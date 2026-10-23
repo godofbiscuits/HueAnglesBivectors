@@ -153,6 +153,70 @@ struct Bivectors_LabTests {
         #expect(!flag.sawMainThread)
     }
 
+    // MARK: Ping-pong playback
+
+    @Test func pingPongFlipsOnlyAtTheEndsWhenPlayingTowardThem() {
+        let flip = PingPongController.flip
+        let duration = 12.0
+        let tolerance = PingPongController.edgeTolerance
+
+        // Forward, mid-movie: keep going.
+        #expect(flip(1, 5, duration, true) == nil)
+        // Forward, at the end: reverse.
+        #expect(flip(1, duration, duration, true)?.rate == -1)
+        #expect(flip(1, duration - tolerance / 2, duration, true)?.rate == -1)
+        #expect(flip(1, duration, duration, true)?.restartFromBeginning == false)
+        // Reverse, mid-movie: keep going. Reverse, at the start: go forward again.
+        #expect(flip(-1, 5, duration, true) == nil)
+        #expect(flip(-1, 0, duration, true)?.rate == 1)
+        // Paused (last rate 0) at either end: leave it alone, so scrubbing to an end doesn't restart playback.
+        #expect(flip(0, duration, duration, true) == nil)
+        #expect(flip(0, 0, duration, true) == nil)
+        // Playing forward at the *start* or reverse at the *end* is not an end condition.
+        #expect(flip(1, 0, duration, true) == nil)
+        #expect(flip(-1, duration, duration, true) == nil)
+        // An item that can't play backward just loops from the beginning.
+        let loop = flip(1, duration, duration, false)
+        #expect(loop?.rate == 1)
+        #expect(loop?.restartFromBeginning == true)
+        // Unknown duration: do nothing.
+        #expect(flip(1, 0, 0, true) == nil)
+    }
+
+    @MainActor
+    @Test func pingPongPlayerReversesAtTheEndAndTurnsAroundAtTheStart() async throws {
+        let source = RGBAF16Image(srgb8: [UInt8](repeating: 128, count: 64 * 64 * 4), width: 64, height: 64)
+        // One second of movie.
+        let url = try await MovieExporter.export(
+            source: source, adjustment: OklabAdjustment(), settings: MovieExporter.Settings(frameCount: 30)
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let controller = PingPongController(url: url)
+        defer { controller.stop() }
+        let player = controller.player
+        let duration = try await #require(player.currentItem).asset.load(.duration).seconds
+
+        func waitUntil(_ condition: () -> Bool) async throws -> Bool {
+            for _ in 0..<150 {  // up to 3 s
+                if condition() { return true }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            return condition()
+        }
+
+        controller.start()
+        #expect(try await waitUntil { player.rate > 0 })
+
+        // Jump near the end: playback should reach it and turn around.
+        await player.seek(to: CMTime(seconds: duration - 0.1, preferredTimescale: 600))
+        #expect(try await waitUntil { player.rate < 0 })
+
+        // Jump near the start while reversing: it should turn around and play forward again.
+        await player.seek(to: CMTime(seconds: 0.1, preferredTimescale: 600))
+        #expect(try await waitUntil { player.rate > 0 })
+    }
+
     @Test func movieExportRejectsTinyImages() async {
         let source = RGBAF16Image(width: 1, height: 1, pixels: [0, 0, 0, 1])
         await #expect(throws: MovieExporter.ExportError.self) {

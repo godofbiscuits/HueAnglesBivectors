@@ -75,7 +75,11 @@ struct ContentView: View {
             presentedMovie = MovieItem(url: url)
 #endif
         }
-#if !os(macOS)
+#if os(iOS)
+        .fullScreenCover(item: $presentedMovie) { movie in
+            MoviePlayerView(url: movie.url)
+        }
+#elseif !os(macOS)
         .sheet(item: $presentedMovie) { movie in
             MoviePlayerView(url: movie.url)
         }
