@@ -139,10 +139,17 @@ struct ContentView: View {
 
     private var dialControl: some View {
         VStack(spacing: 6) {
-            HueDial(degrees: $model.adjustment.deltaThetaDegrees)
+            HueDial(degrees: $model.adjustment.deltaThetaDegrees, onDrag: model.stopAnimation)
                 .frame(width: 190, height: 190)
-            Stepper("Fine adjust Δθ", value: $model.adjustment.deltaThetaDegrees, in: 0...360, step: 1)
-                .labelsHidden()
+            HStack {
+                Stepper("Fine adjust Δθ", value: $model.adjustment.deltaThetaDegrees, in: 0...360, step: 1)
+                    .labelsHidden()
+                Button(model.isAnimating ? "Stop" : "Animate",
+                       systemImage: model.isAnimating ? "stop.fill" : "play.fill") {
+                    model.toggleAnimation()
+                }
+                .help("Rotate the hue angle through a full 360° in \(Int(HueLabModel.animationSeconds)) seconds")
+            }
         }
     }
 
@@ -167,6 +174,7 @@ struct ContentView: View {
     private var infoColumn: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button("Reset", systemImage: "arrow.counterclockwise") {
+                model.stopAnimation()
                 model.adjustment.resetValues()
             }
             .disabled(model.adjustment.isIdentity)

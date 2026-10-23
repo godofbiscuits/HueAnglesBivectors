@@ -6,9 +6,66 @@
 //
 
 import Testing
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 @testable import Bivectors_Lab
 
+/// Small PNG with a few saturated colors, for loading into the model.
+private func makeTestPNG() -> Data? {
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let context = CGContext(
+              data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+          ) else { return nil }
+    let colors: [CGColor] = [
+        CGColor(red: 1, green: 0, blue: 0, alpha: 1), CGColor(red: 0, green: 1, blue: 0, alpha: 1),
+        CGColor(red: 0, green: 0, blue: 1, alpha: 1), CGColor(red: 0.8, green: 0.6, blue: 0.2, alpha: 1),
+    ]
+    for (index, color) in colors.enumerated() {
+        context.setFillColor(color)
+        context.fill(CGRect(x: (index % 2) * 4, y: (index / 2) * 4, width: 4, height: 4))
+    }
+    guard let image = context.makeImage() else { return nil }
+    let data = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { return nil }
+    return data as Data
+}
+
 struct Bivectors_LabTests {
+
+    @MainActor
+    @Test func animationSweepsHueAngleAndStops() async throws {
+        let model = HueLabModel()
+        let png = try #require(makeTestPNG())
+
+        // Nothing to animate until an image is loaded.
+        model.startAnimation()
+        #expect(!model.isAnimating)
+
+        await model.load(data: png)
+        model.adjustment.deltaThetaDegrees = 90
+        model.startAnimation()
+        #expect(model.isAnimating)
+
+        // 36°/s, so after ~0.3 s the angle has advanced past the 90° start.
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(model.isAnimating)
+        #expect(model.adjustment.deltaThetaDegrees > 95)
+        #expect(model.adjustment.deltaThetaDegrees < 130)
+
+        model.stopAnimation()
+        #expect(!model.isAnimating)
+        let stopped = model.adjustment.deltaThetaDegrees
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(model.adjustment.deltaThetaDegrees == stopped)
+    }
+
+    @Test func animationCoversFullRotationInTenSeconds() {
+        #expect(HueLabModel.animationSeconds == 10)
+    }
 
     private func expectClose(_ a: SIMD3<Float>, _ b: SIMD3<Float>, tolerance: Float, sourceLocation: SourceLocation = #_sourceLocation) {
         #expect(abs(a.x - b.x) <= tolerance, sourceLocation: sourceLocation)

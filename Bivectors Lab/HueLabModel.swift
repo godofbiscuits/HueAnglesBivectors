@@ -52,7 +52,54 @@ final class HueLabModel {
     private static let previewDimension = 1024
     private static let fullDimension = 4096
 
+    // MARK: Animation
+
+    /// Seconds for one full 2π (360°) rotation of the hue angle.
+    static let animationSeconds = 10.0
+
+    private(set) var isAnimating = false
+    @ObservationIgnored private var animationTask: Task<Void, Never>?
+
+    func toggleAnimation() {
+        if isAnimating { stopAnimation() } else { startAnimation() }
+    }
+
+    /// Sweeps the hue angle through one full rotation, from its current value back to it, over `animationSeconds`.
+    /// Progress follows the wall clock, so slow renders skip frames instead of stretching the animation.
+    func startAnimation() {
+        guard previewSource != nil, !isAnimating else { return }
+        isAnimating = true
+        let startAngle = adjustment.deltaThetaDegrees
+        let clock = ContinuousClock()
+        let startTime = clock.now
+        animationTask = Task {
+            while !Task.isCancelled {
+                let elapsed = clock.now - startTime
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                let progress = seconds / Self.animationSeconds
+                if progress >= 1 {
+                    adjustment.deltaThetaDegrees = startAngle
+                    break
+                }
+                adjustment.deltaThetaDegrees = (startAngle + 360 * progress).truncatingRemainder(dividingBy: 360)
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            // A cancelled task was already cleaned up by stopAnimation(); don't clobber a newer animation.
+            if !Task.isCancelled {
+                isAnimating = false
+                animationTask = nil
+            }
+        }
+    }
+
+    func stopAnimation() {
+        animationTask?.cancel()
+        animationTask = nil
+        isAnimating = false
+    }
+
     func load(data: Data) async {
+        stopAnimation()
         errorMessage = nil
         let decoded = await Task.detached(priority: .userInitiated) {
             Self.decode(data)

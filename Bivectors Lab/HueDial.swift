@@ -8,6 +8,8 @@ import SwiftUI
 /// A circular dial for the hue rotation Δθ in degrees (0..<360, counter-clockwise like the (a, b) plane).
 struct HueDial: View {
     @Binding var degrees: Double
+    /// Called whenever the user drags the dial (e.g. to stop an animation that is driving it).
+    var onDrag: (() -> Void)?
 
     /// Ring colors: at screen angle φ (clockwise from 3 o'clock) the Oklab hue is -φ,
     /// so the knob sitting at θ counter-clockwise shows hue θ.
@@ -49,6 +51,7 @@ struct HueDial: View {
             .contentShape(Circle())
             .gesture(
                 DragGesture(minimumDistance: 0).onChanged { value in
+                    onDrag?()
                     let dx = value.location.x - size / 2
                     let dy = size / 2 - value.location.y
                     var angle = atan2(dy, dx) * 180 / .pi
