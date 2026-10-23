@@ -10,17 +10,24 @@ import Observation
 @MainActor
 @Observable
 final class HueLabModel {
-    /// The stored metadata: Δθ plus lightness / chroma scale.
+    /// The stored metadata: Δθ plus lightness / chroma scale. Both variants below are driven by it.
     var adjustment = OklabAdjustment()
 
     private(set) var originalImage: CGImage?
+    /// Plain hue / chroma adjustment (luminance drifts with hue).
     private(set) var adjustedImage: CGImage?
+    /// Same adjustment with each pixel's luminance Y held at its original value.
+    private(set) var preservedImage: CGImage?
     private(set) var restoredImage: CGImage?
+    private(set) var restoredPreservedImage: CGImage?
     private(set) var outOfGamut = 0
-    /// Mean luminance Y (linear light) of the preview before and after the adjustment.
+    private(set) var preservedOutOfGamut = 0
+    /// Mean luminance Y (linear light) of the preview: original, plain adjustment, luminance-preserving adjustment.
     private(set) var originalMeanLuminance = 0.0
     private(set) var adjustedMeanLuminance = 0.0
+    private(set) var preservedMeanLuminance = 0.0
     private(set) var restoreStats: RestoreStats?
+    private(set) var restorePreservedStats: RestoreStats?
     private(set) var isRestoring = false
     private(set) var errorMessage: String?
 
@@ -67,7 +74,9 @@ final class HueLabModel {
     /// adjustment moved in the meantime, so dragging never queues up stale work.
     func adjustmentChanged() {
         restoredImage = nil
+        restoredPreservedImage = nil
         restoreStats = nil
+        restorePreservedStats = nil
         renderPending = true
         guard !isRendering else { return }
         isRendering = true
@@ -79,36 +88,75 @@ final class HueLabModel {
     private func renderLoop() async {
         while renderPending, let preview = previewSource {
             renderPending = false
-            let adjustment = adjustment
-            let (result, meanY) = await Task.detached(priority: .userInitiated) {
-                let result = OklabRotor.apply(adjustment, to: preview)
-                return (result, OklabRotor.meanLuminance(of: result.image))
+            let plain = adjustment
+            let preserved = preservingLuminance(adjustment)
+            let (plainRender, preservedRender) = await Task.detached(priority: .userInitiated) {
+                (Self.render(plain, of: preview), Self.render(preserved, of: preview))
             }.value
-            adjustedImage = result.image.makeCGImage()
-            outOfGamut = result.outOfGamut
-            adjustedMeanLuminance = meanY
+            adjustedImage = plainRender.image.makeCGImage()
+            outOfGamut = plainRender.outOfGamut
+            adjustedMeanLuminance = plainRender.meanLuminance
+            preservedImage = preservedRender.image.makeCGImage()
+            preservedOutOfGamut = preservedRender.outOfGamut
+            preservedMeanLuminance = preservedRender.meanLuminance
         }
         isRendering = false
     }
 
-    /// Applies the adjustment to the full-res float image, then its inverse, and compares with the original.
+    private struct Render: Sendable {
+        let image: RGBAF16Image
+        let outOfGamut: Int
+        let meanLuminance: Double
+    }
+
+    nonisolated private static func render(_ adjustment: OklabAdjustment, of source: RGBAF16Image) -> Render {
+        let result = OklabRotor.apply(adjustment, to: source)
+        return Render(
+            image: result.image,
+            outOfGamut: result.outOfGamut,
+            meanLuminance: OklabRotor.meanLuminance(of: result.image)
+        )
+    }
+
+    private func preservingLuminance(_ adjustment: OklabAdjustment) -> OklabAdjustment {
+        var preserved = adjustment
+        preserved.preserveLuminance = true
+        return preserved
+    }
+
+    /// Applies each variant to the full-res float image, then its inverse, and compares with the original.
     func restore() {
         guard let full = fullSource, !isRestoring else { return }
-        let adjustment = adjustment
+        let plain = adjustment
+        let preserved = preservingLuminance(adjustment)
         isRestoring = true
         Task {
-            let result = await Task.detached(priority: .userInitiated) { () -> (RGBAF16Image, RestoreStats) in
-                let forward = OklabRotor.apply(adjustment, to: full)
-                let back = OklabRotor.apply(adjustment.inverse, to: forward.image)
-                let diff = OklabRotor.difference(full, back.image)
-                return (back.image, RestoreStats(maxError: diff.max, meanError: diff.mean, outOfGamut: forward.outOfGamut))
+            let result = await Task.detached(priority: .userInitiated) {
+                (Self.roundTrip(plain, of: full), Self.roundTrip(preserved, of: full))
             }.value
             isRestoring = false
             // Ignore the result if the dials moved while we were working.
-            guard adjustment == self.adjustment else { return }
-            restoredImage = result.0.makeCGImage()
-            restoreStats = result.1
+            guard plain == adjustment else { return }
+            restoredImage = result.0.image.makeCGImage()
+            restoreStats = result.0.stats
+            restoredPreservedImage = result.1.image.makeCGImage()
+            restorePreservedStats = result.1.stats
         }
+    }
+
+    private struct RoundTrip: Sendable {
+        let image: RGBAF16Image
+        let stats: RestoreStats
+    }
+
+    nonisolated private static func roundTrip(_ adjustment: OklabAdjustment, of full: RGBAF16Image) -> RoundTrip {
+        let forward = OklabRotor.apply(adjustment, to: full)
+        let back = OklabRotor.apply(adjustment.inverse, to: forward.image)
+        let diff = OklabRotor.difference(full, back.image)
+        return RoundTrip(
+            image: back.image,
+            stats: RestoreStats(maxError: diff.max, meanError: diff.mean, outOfGamut: forward.outOfGamut)
+        )
     }
 
     nonisolated private static func decode(_ data: Data) -> (RGBAF16Image, RGBAF16Image)? {

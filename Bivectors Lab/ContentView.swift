@@ -35,7 +35,7 @@ struct ContentView: View {
         }
 #if os(macOS)
         // Enough room for the images plus the full control row without scrolling.
-        .frame(minWidth: 900, minHeight: 680)
+        .frame(minWidth: 1100, minHeight: 680)
 #endif
         .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.image]) { result in
             if case .success(let url) = result {
@@ -87,7 +87,7 @@ struct ContentView: View {
                 }
             }
             .padding()
-            .frame(minWidth: 820)
+            .frame(minWidth: 1000)
 
             ScrollView {
                 VStack(spacing: 24) {
@@ -104,9 +104,13 @@ struct ContentView: View {
     @ViewBuilder
     private var imagePanes: some View {
         pane("Original", image: model.originalImage)
-        pane("Adjusted", image: model.adjustedImage)
+        pane("Hue-altered", image: model.adjustedImage)
+        pane("Hue-altered, luminance preserved", image: model.preservedImage)
         if let restored = model.restoredImage {
-            pane("Restored (inverse)", image: restored)
+            pane("Restored: hue-altered", image: restored)
+        }
+        if let restored = model.restoredPreservedImage {
+            pane("Restored: luminance preserved", image: restored)
         }
     }
 
@@ -114,6 +118,8 @@ struct ContentView: View {
         VStack(spacing: 6) {
             Text(title)
                 .font(.headline)
+                .multilineTextAlignment(.center)
+                .lineLimit(2, reservesSpace: true)
             if let image {
                 Image(decorative: image, scale: 1)
                     .resizable()
@@ -141,8 +147,6 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             scaleSlider("Lightness scale", value: $model.adjustment.lightnessScale)
             scaleSlider("Chroma scale", value: $model.adjustment.chromaScale)
-            Toggle("Preserve luminance", isOn: $model.adjustment.preserveLuminance)
-                .help("Hold each pixel's luminance Y at its original value (× lightness scale³) after the hue / chroma change")
         }
         .frame(minWidth: 220, maxWidth: 320)
     }
@@ -162,9 +166,14 @@ struct ContentView: View {
             }
             .disabled(model.isRestoring)
 
-            if let stats = model.restoreStats {
-                Text("Restore error vs original: max \(stats.maxError, specifier: "%.3f"), mean \(stats.meanError, specifier: "%.4f") (8-bit units, of 255)")
-                    .font(.callout.monospacedDigit())
+            if let stats = model.restoreStats, let preservedStats = model.restorePreservedStats {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Restore error vs original (8-bit units, of 255)")
+                        .font(.callout)
+                    Text("Hue-altered: max \(stats.maxError, specifier: "%.3f"), mean \(stats.meanError, specifier: "%.4f")")
+                    Text("Luminance preserved: max \(preservedStats.maxError, specifier: "%.3f"), mean \(preservedStats.meanError, specifier: "%.4f")")
+                }
+                .font(.callout.monospacedDigit())
             }
         }
         .frame(minWidth: 280, maxWidth: 400, alignment: .leading)
@@ -188,9 +197,11 @@ struct ContentView: View {
                 .font(.headline)
             Text("Δθ = \(model.adjustment.deltaThetaDegrees, specifier: "%.2f")°   L × \(model.adjustment.lightnessScale, specifier: "%.2f")   C × \(model.adjustment.chromaScale, specifier: "%.2f")")
                 .font(.callout.monospacedDigit())
-            Text("Mean luminance Y: \(model.originalMeanLuminance, specifier: "%.4f") → \(model.adjustedMeanLuminance, specifier: "%.4f")")
+            Text("Mean luminance Y: original \(model.originalMeanLuminance, specifier: "%.4f")")
                 .font(.callout.monospacedDigit())
-            Text("Pixels outside sRGB gamut (preserved, preview): \(model.outOfGamut)")
+            Text("  hue-altered \(model.adjustedMeanLuminance, specifier: "%.4f"), luminance preserved \(model.preservedMeanLuminance, specifier: "%.4f")")
+                .font(.callout.monospacedDigit())
+            Text("Outside sRGB gamut (kept): \(model.outOfGamut) hue-altered, \(model.preservedOutOfGamut) preserved")
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
