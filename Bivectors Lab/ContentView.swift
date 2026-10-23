@@ -33,6 +33,10 @@ struct ContentView: View {
                 }
             }
         }
+#if os(macOS)
+        // Enough room for the images plus the full control row without scrolling.
+        .frame(minWidth: 900, minHeight: 680)
+#endif
         .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.image]) { result in
             if case .success(let url) = result {
                 Task { await model.load(url: url) }
@@ -68,19 +72,32 @@ struct ContentView: View {
         }
     }
 
+    /// Wide windows show everything at once: images take the remaining space above a fixed-height control row.
+    /// Narrow windows (e.g. iPhone) fall back to a scrolling single column.
     private var workspace: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 12) { imagePanes }
-                    VStack(spacing: 16) { imagePanes }
-                }
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 32) { controls }
-                    VStack(spacing: 24) { controls }
+        ViewThatFits(in: .horizontal) {
+            VStack(spacing: 16) {
+                HStack(spacing: 12) { imagePanes }
+                    .frame(maxHeight: .infinity)
+                Divider()
+                HStack(alignment: .center, spacing: 28) {
+                    dialControl
+                    sliderColumn
+                    infoColumn
                 }
             }
             .padding()
+            .frame(minWidth: 820)
+
+            ScrollView {
+                VStack(spacing: 24) {
+                    VStack(spacing: 16) { imagePanes }
+                    dialControl
+                    sliderColumn
+                    infoColumn
+                }
+                .padding()
+            }
         }
     }
 
@@ -102,32 +119,40 @@ struct ContentView: View {
                     .resizable()
                     .scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 220, maxWidth: .infinity)
+        .frame(minWidth: 160, maxWidth: .infinity)
     }
 
-    @ViewBuilder
-    private var controls: some View {
-        VStack(spacing: 8) {
+    private var dialControl: some View {
+        VStack(spacing: 6) {
             HueDial(degrees: $model.adjustment.deltaThetaDegrees)
-                .frame(width: 220, height: 220)
+                .frame(width: 190, height: 190)
             Stepper("Fine adjust Δθ", value: $model.adjustment.deltaThetaDegrees, in: 0...360, step: 1)
                 .labelsHidden()
         }
+    }
 
+    private var sliderColumn: some View {
         VStack(alignment: .leading, spacing: 16) {
             scaleSlider("Lightness scale", value: $model.adjustment.lightnessScale)
             scaleSlider("Chroma scale", value: $model.adjustment.chromaScale)
+        }
+        .frame(minWidth: 220, maxWidth: 320)
+    }
 
+    /// Right of the sliders: reset, stored metadata, restore.
+    private var infoColumn: some View {
+        VStack(alignment: .leading, spacing: 10) {
             Button("Reset", systemImage: "arrow.counterclockwise") {
                 model.adjustment = OklabAdjustment()
             }
             .disabled(model.adjustment.isIdentity)
 
-            Divider()
             metadataReadout
 
             Button("Restore (apply inverse)", systemImage: "arrow.uturn.backward") {
@@ -140,7 +165,7 @@ struct ContentView: View {
                     .font(.callout.monospacedDigit())
             }
         }
-        .frame(minWidth: 260, maxWidth: 360)
+        .frame(minWidth: 280, maxWidth: 400, alignment: .leading)
     }
 
     private func scaleSlider(_ title: String, value: Binding<Double>) -> some View {
