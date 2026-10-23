@@ -136,7 +136,7 @@ struct ContentView: View {
             .disabled(model.isRestoring)
 
             if let stats = model.restoreStats {
-                Text("Restore error vs original: max \(stats.maxError), mean \(stats.meanError, specifier: "%.3f") (of 255)")
+                Text("Restore error vs original: max \(stats.maxError, specifier: "%.3f"), mean \(stats.meanError, specifier: "%.4f") (8-bit units, of 255)")
                     .font(.callout.monospacedDigit())
             }
         }
@@ -161,7 +161,7 @@ struct ContentView: View {
                 .font(.headline)
             Text("Δθ = \(model.adjustment.deltaThetaDegrees, specifier: "%.2f")°   L × \(model.adjustment.lightnessScale, specifier: "%.2f")   C × \(model.adjustment.chromaScale, specifier: "%.2f")")
                 .font(.callout.monospacedDigit())
-            Text("Out-of-gamut pixels clamped (preview): \(model.outOfGamut)")
+            Text("Pixels outside sRGB gamut (preserved, preview): \(model.outOfGamut)")
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
         }

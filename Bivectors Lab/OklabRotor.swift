@@ -6,6 +6,10 @@
 //  by a single angle. L and chroma can additionally be scaled; the three
 //  numbers in `OklabAdjustment` are all that is needed to undo the edit.
 //
+//  Pixels are held as 16-bit float, premultiplied RGBA in *extended linear
+//  sRGB*, so colors pushed outside the sRGB gamut (negative or >1 components)
+//  are preserved instead of clipped, and the inverse rotor can recover them.
+//
 
 import Foundation
 import CoreGraphics
@@ -60,19 +64,37 @@ struct OklabRotorTransform: Sendable {
 
 // MARK: - Pixel buffer
 
-/// 8-bit sRGB, premultiplied-alpha RGBA pixels.
-struct RGBA8Image: Sendable {
+/// 16-bit float, premultiplied-alpha RGBA in extended linear sRGB. Component values are not limited to 0...1.
+struct RGBAF16Image: Sendable {
     let width: Int
     let height: Int
-    var pixels: [UInt8]
+    var pixels: [Float16]
 
-    init(width: Int, height: Int, pixels: [UInt8]) {
+    init(width: Int, height: Int, pixels: [Float16]) {
         self.width = width
         self.height = height
         self.pixels = pixels
     }
 
-    /// Renders `cgImage` into an sRGB buffer, optionally downsampling so the long edge is at most `maxDimension`.
+    /// Builds an opaque-or-translucent image from gamma-encoded 8-bit sRGB RGBA bytes (non-premultiplied).
+    init(srgb8 bytes: [UInt8], width: Int, height: Int) {
+        var pixels = [Float16](repeating: 0, count: bytes.count)
+        for i in stride(from: 0, to: bytes.count, by: 4) {
+            let alpha = Float(bytes[i + 3]) / 255
+            for c in 0..<3 {
+                pixels[i + c] = Float16(OklabRotor.srgbDecode(Float(bytes[i + c]) / 255) * alpha)
+            }
+            pixels[i + 3] = Float16(alpha)
+        }
+        self.init(width: width, height: height, pixels: pixels)
+    }
+
+    private static let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        | CGBitmapInfo.floatComponents.rawValue
+        | CGBitmapInfo.byteOrder16Little.rawValue
+
+    /// Renders `cgImage` into an extended linear sRGB buffer (wide-gamut sources keep out-of-sRGB colors),
+    /// optionally downsampling so the long edge is at most `maxDimension`.
     init?(cgImage: CGImage, maxDimension: Int? = nil) {
         var w = cgImage.width
         var h = cgImage.height
@@ -82,17 +104,17 @@ struct RGBA8Image: Sendable {
             w = max(1, Int((Double(w) * scale).rounded()))
             h = max(1, Int((Double(h) * scale).rounded()))
         }
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        var data = [UInt8](repeating: 0, count: w * h * 4)
+        guard let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) else { return nil }
+        var data = [Float16](repeating: 0, count: w * h * 4)
         let drawn: Bool = data.withUnsafeMutableBytes { buffer in
             guard let context = CGContext(
                 data: buffer.baseAddress,
                 width: w,
                 height: h,
-                bitsPerComponent: 8,
-                bytesPerRow: w * 4,
+                bitsPerComponent: 16,
+                bytesPerRow: w * 8,
                 space: space,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                bitmapInfo: Self.bitmapInfo
             ) else { return false }
             context.interpolationQuality = .high
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
@@ -103,16 +125,17 @@ struct RGBA8Image: Sendable {
     }
 
     func makeCGImage() -> CGImage? {
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-              let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
+        guard let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) else { return nil }
+        let data = pixels.withUnsafeBytes { Data($0) }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
         return CGImage(
             width: width,
             height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: width * 4,
+            bitsPerComponent: 16,
+            bitsPerPixel: 64,
+            bytesPerRow: width * 8,
             space: space,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            bitmapInfo: CGBitmapInfo(rawValue: Self.bitmapInfo),
             provider: provider,
             decode: nil,
             shouldInterpolate: true,
@@ -122,14 +145,16 @@ struct RGBA8Image: Sendable {
 }
 
 struct AdjustmentResult: Sendable {
-    let image: RGBA8Image
-    /// Pixels whose adjusted color fell outside the sRGB gamut and were clamped.
+    let image: RGBAF16Image
+    /// Pixels whose adjusted color lies outside the sRGB gamut. They are preserved, not clamped.
     let outOfGamut: Int
 }
 
 struct RestoreStats: Sendable, Equatable {
-    let maxError: Int
+    /// Maximum / mean absolute difference per RGB channel, in gamma-encoded 8-bit units (0...255).
+    let maxError: Double
     let meanError: Double
+    /// Pixels that were outside sRGB after the forward adjustment (recoverable thanks to extended range).
     let outOfGamut: Int
 }
 
@@ -146,6 +171,12 @@ enum OklabRotor {
     @inline(__always)
     static func srgbEncode(_ v: Float) -> Float {
         v <= 0.0031308 ? v * 12.92 : 1.055 * powf(v, 1 / 2.4) - 0.055
+    }
+
+    /// Sign-symmetric encode so negative (out-of-gamut) linear values can be compared in perceptual units.
+    @inline(__always)
+    static func srgbEncodeExtended(_ v: Float) -> Float {
+        v < 0 ? -srgbEncode(-v) : srgbEncode(v)
     }
 
     // MARK: Linear sRGB <-> Oklab (Björn Ottosson)
@@ -176,25 +207,26 @@ enum OklabRotor {
         )
     }
 
+    /// True if every linear component lies within 0...1 (allowing a small tolerance).
+    @inline(__always)
+    static func isInSRGBGamut(_ linear: SIMD3<Float>) -> Bool {
+        let tolerance: Float = 0.0005
+        return linear.x >= -tolerance && linear.x <= 1 + tolerance
+            && linear.y >= -tolerance && linear.y <= 1 + tolerance
+            && linear.z >= -tolerance && linear.z <= 1 + tolerance
+    }
+
     /// Gamma-encoded sRGB (0...1) to Oklab.
     static func srgbToOklab(_ rgb: SIMD3<Float>) -> SIMD3<Float> {
         linearToOklab(SIMD3(srgbDecode(rgb.x), srgbDecode(rgb.y), srgbDecode(rgb.z)))
     }
 
     /// Oklab to gamma-encoded sRGB, clamped to 0...1. `inGamut` is false if clamping was needed.
+    /// (Display / UI use only: the pixel pipeline keeps out-of-gamut values.)
     static func oklabToSrgb(_ lab: SIMD3<Float>) -> (rgb: SIMD3<Float>, inGamut: Bool) {
         let linear = oklabToLinear(lab)
-        let tolerance: Float = 0.0005
-        let inGamut = linear.x >= -tolerance && linear.x <= 1 + tolerance
-            && linear.y >= -tolerance && linear.y <= 1 + tolerance
-            && linear.z >= -tolerance && linear.z <= 1 + tolerance
-        let clamped = simd_clamp(linear)
-        return (SIMD3(srgbEncode(clamped.x), srgbEncode(clamped.y), srgbEncode(clamped.z)), inGamut)
-    }
-
-    @inline(__always)
-    private static func simd_clamp(_ v: SIMD3<Float>) -> SIMD3<Float> {
-        v.clamped(lowerBound: .zero, upperBound: SIMD3(repeating: 1))
+        let clamped = linear.clamped(lowerBound: .zero, upperBound: SIMD3(repeating: 1))
+        return (SIMD3(srgbEncode(clamped.x), srgbEncode(clamped.y), srgbEncode(clamped.z)), isInSRGBGamut(linear))
     }
 
     /// A display color for a hue angle in Oklab at the given lightness and chroma (used by the dial's ring).
@@ -205,8 +237,9 @@ enum OklabRotor {
 
     // MARK: Batch rotor
 
-    /// Applies `adjustment` to every pixel. Alpha is preserved; out-of-gamut results are clamped and counted.
-    static func apply(_ adjustment: OklabAdjustment, to image: RGBA8Image) -> AdjustmentResult {
+    /// Applies `adjustment` to every pixel. Alpha is preserved. Out-of-sRGB-gamut results are kept
+    /// (no clamping) and counted.
+    static func apply(_ adjustment: OklabAdjustment, to image: RGBAF16Image) -> AdjustmentResult {
         let width = image.width, height = image.height
         guard width > 0, height > 0 else { return AdjustmentResult(image: image, outOfGamut: 0) }
 
@@ -221,25 +254,20 @@ enum OklabRotor {
                     var rowOutOfGamut = 0
                     for x in 0..<width {
                         let i = (y * width + x) * 4
-                        let alpha8 = pixels[i + 3]
-                        if alpha8 == 0 { continue }
+                        let alpha = Float(pixels[i + 3])
+                        if alpha <= 0 { continue }
 
-                        // Un-premultiply, adjust in Oklab, re-premultiply.
-                        let alpha = Float(alpha8) / 255
-                        var rgb = SIMD3(Float(pixels[i]), Float(pixels[i + 1]), Float(pixels[i + 2])) / 255
-                        if alpha8 < 255 {
-                            rgb = (rgb / alpha).clamped(lowerBound: .zero, upperBound: SIMD3(repeating: 1))
-                        }
+                        // Un-premultiply, adjust in Oklab, re-premultiply. No clamping anywhere.
+                        var linear = SIMD3(Float(pixels[i]), Float(pixels[i + 1]), Float(pixels[i + 2]))
+                        if alpha < 1 { linear /= alpha }
 
-                        let lab = transform.apply(srgbToOklab(rgb))
-                        let converted = oklabToSrgb(lab)
-                        if !converted.inGamut { rowOutOfGamut += 1 }
+                        var result = oklabToLinear(transform.apply(linearToOklab(linear)))
+                        if !isInSRGBGamut(result) { rowOutOfGamut += 1 }
+                        if alpha < 1 { result *= alpha }
 
-                        var result = converted.rgb
-                        if alpha8 < 255 { result *= alpha }
-                        pixels[i] = UInt8((result.x * 255).rounded())
-                        pixels[i + 1] = UInt8((result.y * 255).rounded())
-                        pixels[i + 2] = UInt8((result.z * 255).rounded())
+                        pixels[i] = Float16(result.x)
+                        pixels[i + 1] = Float16(result.y)
+                        pixels[i + 2] = Float16(result.z)
                     }
                     counts[y] = rowOutOfGamut
                 }
@@ -247,25 +275,26 @@ enum OklabRotor {
         }
 
         return AdjustmentResult(
-            image: RGBA8Image(width: width, height: height, pixels: output),
+            image: RGBAF16Image(width: width, height: height, pixels: output),
             outOfGamut: rowCounts.reduce(0, +)
         )
     }
 
-    /// Maximum and mean absolute per-channel (RGB) difference between two same-sized buffers.
-    static func difference(_ a: RGBA8Image, _ b: RGBA8Image) -> (max: Int, mean: Double) {
+    /// Maximum and mean absolute per-channel (RGB) difference between two same-sized buffers,
+    /// measured in gamma-encoded 8-bit units (0...255).
+    static func difference(_ a: RGBAF16Image, _ b: RGBAF16Image) -> (max: Double, mean: Double) {
         guard a.width == b.width, a.height == b.height, !a.pixels.isEmpty else { return (0, 0) }
-        var maxError = 0
-        var total = 0
+        var maxError: Float = 0
+        var total: Double = 0
         var count = 0
         for i in stride(from: 0, to: a.pixels.count, by: 4) {
             for c in 0..<3 {
-                let d = abs(Int(a.pixels[i + c]) - Int(b.pixels[i + c]))
+                let d = abs(srgbEncodeExtended(Float(a.pixels[i + c])) - srgbEncodeExtended(Float(b.pixels[i + c]))) * 255
                 maxError = max(maxError, d)
-                total += d
+                total += Double(d)
                 count += 1
             }
         }
-        return (maxError, Double(total) / Double(count))
+        return (Double(maxError), total / Double(count))
     }
 }

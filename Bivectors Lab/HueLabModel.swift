@@ -22,9 +22,9 @@ final class HueLabModel {
     private(set) var errorMessage: String?
 
     /// Full-resolution source (capped at 4096 px) used for restore verification.
-    @ObservationIgnored private var fullSource: RGBA8Image?
+    @ObservationIgnored private var fullSource: RGBAF16Image?
     /// ~1 MP source used for live preview while dragging.
-    @ObservationIgnored private var previewSource: RGBA8Image?
+    @ObservationIgnored private var previewSource: RGBAF16Image?
     @ObservationIgnored private var renderTask: Task<Void, Never>?
 
     private static let previewDimension = 1024
@@ -73,13 +73,13 @@ final class HueLabModel {
         }
     }
 
-    /// Applies the adjustment to the 8-bit full-res image, then its inverse, and compares with the original.
+    /// Applies the adjustment to the full-res float image, then its inverse, and compares with the original.
     func restore() {
         guard let full = fullSource, !isRestoring else { return }
         let adjustment = adjustment
         isRestoring = true
         Task {
-            let result = await Task.detached(priority: .userInitiated) { () -> (RGBA8Image, RestoreStats) in
+            let result = await Task.detached(priority: .userInitiated) { () -> (RGBAF16Image, RestoreStats) in
                 let forward = OklabRotor.apply(adjustment, to: full)
                 let back = OklabRotor.apply(adjustment.inverse, to: forward.image)
                 let diff = OklabRotor.difference(full, back.image)
@@ -93,7 +93,7 @@ final class HueLabModel {
         }
     }
 
-    nonisolated private static func decode(_ data: Data) -> (RGBA8Image, RGBA8Image)? {
+    nonisolated private static func decode(_ data: Data) -> (RGBAF16Image, RGBAF16Image)? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -101,8 +101,8 @@ final class HueLabModel {
             kCGImageSourceThumbnailMaxPixelSize: fullDimension,
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-              let full = RGBA8Image(cgImage: cgImage),
-              let preview = RGBA8Image(cgImage: cgImage, maxDimension: previewDimension) else { return nil }
+              let full = RGBAF16Image(cgImage: cgImage),
+              let preview = RGBAF16Image(cgImage: cgImage, maxDimension: previewDimension) else { return nil }
         return (full, preview)
     }
 }

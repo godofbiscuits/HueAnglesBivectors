@@ -64,34 +64,62 @@ struct Bivectors_LabTests {
         #expect(abs(inverse.chromaScale - 2) < 1e-12)
     }
 
-    @Test func eightBitBatchRoundTripForInGamutPixels() {
+    @Test func batchRoundTripForInGamutPixels() {
         // Low-chroma colors stay inside sRGB after a hue rotation.
         let width = 32, height = 16
-        var pixels = [UInt8]()
+        var bytes = [UInt8]()
         for y in 0..<height {
             for x in 0..<width {
                 let base = 90 + x * 2 + y
-                pixels += [UInt8(base), UInt8(base + 6), UInt8(base - 5), 255]
+                bytes += [UInt8(base), UInt8(base + 6), UInt8(base - 5), 255]
             }
         }
-        let image = RGBA8Image(width: width, height: height, pixels: pixels)
+        let image = RGBAF16Image(srgb8: bytes, width: width, height: height)
         let adjustment = OklabAdjustment(deltaThetaDegrees: 40, lightnessScale: 1, chromaScale: 0.9)
 
         let forward = OklabRotor.apply(adjustment, to: image)
         #expect(forward.outOfGamut == 0)
         let back = OklabRotor.apply(adjustment.inverse, to: forward.image)
         let diff = OklabRotor.difference(image, back.image)
-        #expect(diff.max <= 2)
-        #expect(diff.mean < 1)
+        // Well below one 8-bit step, so an 8-bit export of the restored image is exact.
+        #expect(diff.max < 0.5)
         // Alpha is untouched.
-        #expect(back.image.pixels.enumerated().allSatisfy { $0.offset % 4 != 3 || $0.element == 255 })
+        #expect(back.image.pixels.enumerated().allSatisfy { $0.offset % 4 != 3 || $0.element == 1 })
+    }
+
+    @Test func outOfGamutColorsAreNotClippedAndRestore() {
+        // Saturated primaries rotated 120° land outside sRGB; the extended-range buffer must keep them.
+        let bytes: [UInt8] = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 0, 255, 255, 255, 200, 40, 120, 255,
+        ]
+        let image = RGBAF16Image(srgb8: bytes, width: 6, height: 1)
+        let adjustment = OklabAdjustment(deltaThetaDegrees: 120, lightnessScale: 1.05, chromaScale: 1.2)
+
+        let forward = OklabRotor.apply(adjustment, to: image)
+        #expect(forward.outOfGamut > 0)
+        // Stored values really are outside 0...1 (negative or above one), not clamped.
+        #expect(forward.image.pixels.contains { $0 < 0 || $0 > 1 })
+
+        let back = OklabRotor.apply(adjustment.inverse, to: forward.image)
+        let diff = OklabRotor.difference(image, back.image)
+        #expect(diff.max < 1)
+    }
+
+    @Test func translucentPixelsKeepAlphaAndRestore() {
+        let image = RGBAF16Image(srgb8: [200, 60, 90, 128, 30, 140, 220, 64], width: 2, height: 1)
+        let adjustment = OklabAdjustment(deltaThetaDegrees: 75, lightnessScale: 0.9, chromaScale: 1.1)
+        let forward = OklabRotor.apply(adjustment, to: image)
+        #expect(forward.image.pixels[3] == image.pixels[3])
+        #expect(forward.image.pixels[7] == image.pixels[7])
+        let back = OklabRotor.apply(adjustment.inverse, to: forward.image)
+        #expect(OklabRotor.difference(image, back.image).max < 1)
     }
 
     @Test func identityAdjustmentIsNearlyLossless() {
-        let image = RGBA8Image(width: 2, height: 2, pixels: [
+        let image = RGBAF16Image(srgb8: [
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 12, 200, 99, 255,
-        ])
+        ], width: 2, height: 2)
         let result = OklabRotor.apply(OklabAdjustment(), to: image)
-        #expect(OklabRotor.difference(image, result.image).max == 0)
+        #expect(OklabRotor.difference(image, result.image).max < 0.01)
     }
 }
