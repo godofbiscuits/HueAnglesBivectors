@@ -14,9 +14,15 @@ final class HueLabModel {
     var adjustment = OklabAdjustment()
 
     private(set) var originalImage: CGImage?
-    /// Plain hue / chroma adjustment (luminance drifts with hue).
-    private(set) var adjustedImage: CGImage?
-    /// Same adjustment with each pixel's luminance Y held at its original value.
+    /// Per-pixel difference between the plain hue-altered image (luminance drifts with hue) and the
+    /// luminance-preserving one, amplified by `diffGain`. Black means identical.
+    private(set) var diffImage: CGImage?
+    /// Max / mean of that difference in gamma-encoded 8-bit units (0...255), before gain.
+    private(set) var diffMaxError = 0.0
+    private(set) var diffMeanError = 0.0
+    /// Amplification applied to the difference image so small differences are visible.
+    var diffGain = 16.0
+    /// Same adjustment as the plain one, with each pixel's luminance Y held at its original value.
     private(set) var preservedImage: CGImage?
     private(set) var restoredImage: CGImage?
     private(set) var restoredPreservedImage: CGImage?
@@ -37,6 +43,11 @@ final class HueLabModel {
     @ObservationIgnored private var previewSource: RGBAF16Image?
     @ObservationIgnored private var isRendering = false
     @ObservationIgnored private var renderPending = false
+    /// Latest preview renders, kept so the difference can be recomputed when only the gain changes.
+    @ObservationIgnored private var latestPlain: RGBAF16Image?
+    @ObservationIgnored private var latestPreserved: RGBAF16Image?
+    @ObservationIgnored private var isDiffing = false
+    @ObservationIgnored private var diffPending = false
 
     private static let previewDimension = 1024
     private static let fullDimension = 4096
@@ -93,14 +104,41 @@ final class HueLabModel {
             let (plainRender, preservedRender) = await Task.detached(priority: .userInitiated) {
                 (Self.render(plain, of: preview), Self.render(preserved, of: preview))
             }.value
-            adjustedImage = plainRender.image.makeCGImage()
+            latestPlain = plainRender.image
+            latestPreserved = preservedRender.image
             outOfGamut = plainRender.outOfGamut
             adjustedMeanLuminance = plainRender.meanLuminance
             preservedImage = preservedRender.image.makeCGImage()
             preservedOutOfGamut = preservedRender.outOfGamut
             preservedMeanLuminance = preservedRender.meanLuminance
+            diffGainChanged()
         }
         isRendering = false
+    }
+
+    /// Recomputes the difference image from the latest renders. Call when `diffGain` changes; also runs after
+    /// every render. Coalesced the same way as renders so dragging the gain never queues stale work.
+    func diffGainChanged() {
+        diffPending = true
+        guard !isDiffing else { return }
+        isDiffing = true
+        Task {
+            await diffLoop()
+        }
+    }
+
+    private func diffLoop() async {
+        while diffPending, let plain = latestPlain, let preserved = latestPreserved {
+            diffPending = false
+            let gain = Float(diffGain)
+            let map = await Task.detached(priority: .userInitiated) {
+                OklabRotor.differenceMap(plain, preserved, gain: gain)
+            }.value
+            diffImage = map.image.makeCGImage()
+            diffMaxError = map.maxError
+            diffMeanError = map.meanError
+        }
+        isDiffing = false
     }
 
     private struct Render: Sendable {

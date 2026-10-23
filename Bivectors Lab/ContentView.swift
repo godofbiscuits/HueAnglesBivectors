@@ -58,6 +58,9 @@ struct ContentView: View {
         .onChange(of: model.adjustment) {
             model.adjustmentChanged()
         }
+        .onChange(of: model.diffGain) {
+            model.diffGainChanged()
+        }
     }
 
     // MARK: - Pieces
@@ -104,7 +107,7 @@ struct ContentView: View {
     @ViewBuilder
     private var imagePanes: some View {
         pane("Original", image: model.originalImage)
-        pane("Hue-altered", image: model.adjustedImage)
+        pane("Diff ×\(Int(model.diffGain)): hue-altered vs preserved", image: model.diffImage)
         pane("Hue-altered, luminance preserved", image: model.preservedImage)
         if let restored = model.restoredImage {
             pane("Restored: hue-altered", image: restored)
@@ -147,6 +150,15 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             scaleSlider("Lightness scale", value: $model.adjustment.lightnessScale)
             scaleSlider("Chroma scale", value: $model.adjustment.chromaScale)
+            VStack(alignment: .leading) {
+                HStack {
+                    Text("Diff gain")
+                    Spacer()
+                    Text("×\(Int(model.diffGain))")
+                        .monospacedDigit()
+                }
+                Slider(value: $model.diffGain, in: 1...64)
+            }
         }
         .frame(minWidth: 220, maxWidth: 320)
     }
@@ -200,6 +212,8 @@ struct ContentView: View {
             Text("Mean luminance Y: original \(model.originalMeanLuminance, specifier: "%.4f")")
                 .font(.callout.monospacedDigit())
             Text("  hue-altered \(model.adjustedMeanLuminance, specifier: "%.4f"), luminance preserved \(model.preservedMeanLuminance, specifier: "%.4f")")
+                .font(.callout.monospacedDigit())
+            Text("Diff, hue-altered vs preserved: max \(model.diffMaxError, specifier: "%.2f"), mean \(model.diffMeanError, specifier: "%.3f") (8-bit units)")
                 .font(.callout.monospacedDigit())
             Text("Outside sRGB gamut (kept): \(model.outOfGamut) hue-altered, \(model.preservedOutOfGamut) preserved")
                 .font(.callout.monospacedDigit())

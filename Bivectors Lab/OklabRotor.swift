@@ -388,4 +388,62 @@ enum OklabRotor {
         }
         return (Double(maxError), total / Double(count))
     }
+
+    /// Per-pixel, per-channel absolute difference between two same-sized images, as a displayable image
+    /// (opaque; black = identical) plus the max / mean difference in gamma-encoded 8-bit units (0...255).
+    ///
+    /// The difference is taken on gamma-encoded values (what a viewer perceives), multiplied by `gain`,
+    /// clamped to 0...1, and stored as linear light so it displays at that encoded brightness.
+    static func differenceMap(_ a: RGBAF16Image, _ b: RGBAF16Image, gain: Float) -> DifferenceMap {
+        let width = a.width, height = a.height
+        guard b.width == width, b.height == height, width > 0, height > 0 else {
+            return DifferenceMap(image: a, maxError: 0, meanError: 0)
+        }
+
+        var output = [Float16](repeating: 1, count: a.pixels.count)  // alpha stays 1; RGB overwritten below
+        var rowMax = [Float](repeating: 0, count: height)
+        var rowSum = [Double](repeating: 0, count: height)
+
+        a.pixels.withUnsafeBufferPointer { aBuffer in
+            b.pixels.withUnsafeBufferPointer { bBuffer in
+                output.withUnsafeMutableBufferPointer { outBuffer in
+                    rowMax.withUnsafeMutableBufferPointer { maxBuffer in
+                        rowSum.withUnsafeMutableBufferPointer { sumBuffer in
+                            guard let pa = aBuffer.baseAddress, let pb = bBuffer.baseAddress,
+                                  let po = outBuffer.baseAddress,
+                                  let maxes = maxBuffer.baseAddress, let sums = sumBuffer.baseAddress else { return }
+                            DispatchQueue.concurrentPerform(iterations: height) { y in
+                                var rowMaximum: Float = 0
+                                var rowTotal: Double = 0
+                                for x in 0..<width {
+                                    let i = (y * width + x) * 4
+                                    for c in 0..<3 {
+                                        let d = abs(srgbEncodeExtended(Float(pa[i + c])) - srgbEncodeExtended(Float(pb[i + c])))
+                                        rowMaximum = max(rowMaximum, d * 255)
+                                        rowTotal += Double(d * 255)
+                                        po[i + c] = Float16(srgbDecode(min(d * gain, 1)))
+                                    }
+                                }
+                                maxes[y] = rowMaximum
+                                sums[y] = rowTotal
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return DifferenceMap(
+            image: RGBAF16Image(width: width, height: height, pixels: output),
+            maxError: Double(rowMax.max() ?? 0),
+            meanError: rowSum.reduce(0, +) / Double(width * height * 3)
+        )
+    }
+}
+
+struct DifferenceMap: Sendable {
+    let image: RGBAF16Image
+    /// Maximum / mean absolute per-channel difference, in gamma-encoded 8-bit units (0...255).
+    let maxError: Double
+    let meanError: Double
 }

@@ -207,6 +207,49 @@ struct Bivectors_LabTests {
         #expect(reset.preserveLuminance)
     }
 
+    // MARK: Difference map
+
+    @Test func differenceMapOfIdenticalImagesIsBlack() {
+        let image = RGBAF16Image(srgb8: Self.colorfulBytes, width: 8, height: 1)
+        let map = OklabRotor.differenceMap(image, image, gain: 16)
+        #expect(map.maxError == 0)
+        #expect(map.meanError == 0)
+        for i in stride(from: 0, to: map.image.pixels.count, by: 4) {
+            #expect(map.image.pixels[i] == 0 && map.image.pixels[i + 1] == 0 && map.image.pixels[i + 2] == 0)
+            #expect(map.image.pixels[i + 3] == 1)
+        }
+    }
+
+    @Test func differenceMapMeasuresAndAmplifiesKnownDifference() {
+        // Gray 100 vs gray 110 in 8-bit sRGB: a 10-unit difference on every channel.
+        let a = RGBAF16Image(srgb8: [100, 100, 100, 255], width: 1, height: 1)
+        let b = RGBAF16Image(srgb8: [110, 110, 110, 255], width: 1, height: 1)
+
+        let weak = OklabRotor.differenceMap(a, b, gain: 2)
+        #expect(abs(weak.maxError - 10) < 0.3)
+        #expect(abs(weak.meanError - 10) < 0.3)
+        // Encoded 10/255 × 2 ≈ 0.0784 is stored as linear light.
+        let expected = OklabRotor.srgbDecode(10.0 / 255 * 2)
+        #expect(abs(Float(weak.image.pixels[0]) - expected) < 0.05 * expected)
+
+        // Large gain saturates to white.
+        let strong = OklabRotor.differenceMap(a, b, gain: 64)
+        #expect(strong.image.pixels[0] == 1)
+    }
+
+    @Test func plainAndLuminancePreservedVariantsDiffer() {
+        let image = RGBAF16Image(srgb8: Self.colorfulBytes, width: 8, height: 1)
+        let plain = OklabAdjustment(deltaThetaDegrees: 120)
+        let preserved = OklabAdjustment(deltaThetaDegrees: 120, preserveLuminance: true)
+        let map = OklabRotor.differenceMap(
+            OklabRotor.apply(plain, to: image).image,
+            OklabRotor.apply(preserved, to: image).image,
+            gain: 16
+        )
+        #expect(map.maxError > 1)
+        #expect(map.meanError > 0)
+    }
+
     @Test func identityAdjustmentIsNearlyLossless() {
         let image = RGBAF16Image(srgb8: [
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 12, 200, 99, 255,
