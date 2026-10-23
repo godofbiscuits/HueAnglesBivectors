@@ -98,8 +98,53 @@ final class HueLabModel {
         isAnimating = false
     }
 
+    // MARK: Movie
+
+    private(set) var isMakingMovie = false
+    /// 0...1 while a movie is rendering.
+    private(set) var movieProgress = 0.0
+    private(set) var movieErrorMessage: String?
+    /// Set when a movie finishes; the view opens a player for it and clears this.
+    var finishedMovieURL: URL?
+    @ObservationIgnored private var movieTask: Task<Void, Never>?
+
+    /// Renders one frame per degree (360 frames at 30 fps) starting from the current hue angle, with the current
+    /// lightness / chroma scales and diff gain, then publishes the file in `finishedMovieURL`.
+    func makeMovie() {
+        guard let preview = previewSource, !isMakingMovie else { return }
+        stopAnimation()
+        isMakingMovie = true
+        movieProgress = 0
+        movieErrorMessage = nil
+        let adjustment = adjustment
+        let settings = MovieExporter.Settings(diffGain: Float(diffGain))
+        movieTask = Task {
+            do {
+                // `export` is nonisolated, so the rendering runs off the main actor; awaiting it directly
+                // (rather than via a detached task) keeps cancellation connected.
+                let url = try await MovieExporter.export(
+                    source: preview, adjustment: adjustment, settings: settings
+                ) { progress in
+                    Task { @MainActor in self.movieProgress = progress }
+                }
+                finishedMovieURL = url
+            } catch is CancellationError {
+                // Cancelled by the user; nothing to report.
+            } catch {
+                movieErrorMessage = error.localizedDescription
+            }
+            isMakingMovie = false
+            movieTask = nil
+        }
+    }
+
+    func cancelMovie() {
+        movieTask?.cancel()
+    }
+
     func load(data: Data) async {
         stopAnimation()
+        cancelMovie()
         errorMessage = nil
         let decoded = await Task.detached(priority: .userInitiated) {
             Self.decode(data)

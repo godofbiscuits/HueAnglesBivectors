@@ -10,6 +10,11 @@ struct ContentView: View {
     @State private var model = HueLabModel()
     @State private var pickerItem: PhotosPickerItem?
     @State private var showingImporter = false
+#if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+#else
+    @State private var presentedMovie: MovieItem?
+#endif
 
     var body: some View {
         NavigationStack {
@@ -61,6 +66,20 @@ struct ContentView: View {
         .onChange(of: model.diffGain) {
             model.diffGainChanged()
         }
+        .onChange(of: model.finishedMovieURL) { _, url in
+            guard let url else { return }
+            model.finishedMovieURL = nil
+#if os(macOS)
+            openWindow(value: url)
+#else
+            presentedMovie = MovieItem(url: url)
+#endif
+        }
+#if !os(macOS)
+        .sheet(item: $presentedMovie) { movie in
+            MoviePlayerView(url: movie.url)
+        }
+#endif
     }
 
     // MARK: - Pieces
@@ -149,6 +168,26 @@ struct ContentView: View {
                     model.toggleAnimation()
                 }
                 .help("Rotate the hue angle through a full 360° in \(Int(HueLabModel.animationSeconds)) seconds")
+                Button(model.isMakingMovie ? "Cancel" : "Movie",
+                       systemImage: model.isMakingMovie ? "xmark.circle" : "film") {
+                    if model.isMakingMovie { model.cancelMovie() } else { model.makeMovie() }
+                }
+                .help("Render a 30 fps movie that steps the hue angle 1° per frame (360 frames), then play it")
+            }
+            if model.isMakingMovie {
+                VStack(spacing: 2) {
+                    ProgressView(value: model.movieProgress)
+                    Text("Rendering movie… \(Int(model.movieProgress * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 190)
+            }
+            if let message = model.movieErrorMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(width: 190)
             }
         }
     }

@@ -6,7 +6,9 @@
 //
 
 import Testing
+import AVFoundation
 import CoreGraphics
+import CoreMedia
 import ImageIO
 import UniformTypeIdentifiers
 @testable import Bivectors_Lab
@@ -61,6 +63,79 @@ struct Bivectors_LabTests {
         let stopped = model.adjustment.deltaThetaDegrees
         try await Task.sleep(for: .milliseconds(100))
         #expect(model.adjustment.deltaThetaDegrees == stopped)
+    }
+
+    // MARK: Movie export
+
+    @Test func encodeBGRA8ConvertsClampsAndOffsets() {
+        // Two pixels: (0.5, 0.25, 1) and an out-of-gamut (-0.2, 3, 0.5), written one pixel column in.
+        let image = RGBAF16Image(width: 2, height: 1, pixels: [0.5, 0.25, 1, 1, -0.2, 3, 0.5, 1])
+        var output = [UInt8](repeating: 7, count: 12 * 1)  // 3 pixels wide, so pixel 0 is left untouched
+        output.withUnsafeMutableBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
+            MovieExporter.encodeBGRA8(image, width: 2, height: 1, into: base, bytesPerRow: 12, xOffset: 1)
+        }
+        func expected(_ linear: Float) -> Int { Int((OklabRotor.srgbEncode(linear) * 255).rounded()) }
+
+        #expect(Array(output[0..<4]) == [7, 7, 7, 7])
+        // Pixel at column 1: BGRA order, opaque.
+        #expect(abs(Int(output[4]) - expected(1)) <= 1)
+        #expect(abs(Int(output[5]) - expected(0.25)) <= 1)
+        #expect(abs(Int(output[6]) - expected(0.5)) <= 1)
+        #expect(output[7] == 255)
+        // Column 2: negative clamps to 0, >1 clamps to 255.
+        #expect(abs(Int(output[8]) - expected(0.5)) <= 1)
+        #expect(output[9] == 255)
+        #expect(output[10] == 0)
+        #expect(output[11] == 255)
+    }
+
+    @Test func movieExportWritesThirtyFPSLowCompressionMovie() async throws {
+        let width = 96, height = 64
+        var bytes = [UInt8]()
+        for y in 0..<height {
+            for x in 0..<width { bytes += [UInt8(x * 2), UInt8(y * 3), 160, 255] }
+        }
+        let source = RGBAF16Image(srgb8: bytes, width: width, height: height)
+
+        let url = try await MovieExporter.export(
+            source: source,
+            adjustment: OklabAdjustment(deltaThetaDegrees: 30),
+            settings: MovieExporter.Settings(frameCount: 10)
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let asset = AVURLAsset(url: url)
+        let duration = try await asset.load(.duration)
+        #expect(abs(duration.seconds - 10.0 / 30.0) < 0.02)
+
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let (size, frameRate, formats) = try await track.load(.naturalSize, .nominalFrameRate, .formatDescriptions)
+        // Three panes side by side.
+        #expect(size == CGSize(width: width * 3, height: height))
+        #expect(abs(frameRate - 30) < 1)
+        // ProRes 422 HQ when available, otherwise maximum-quality HEVC.
+        let codec = try #require(formats.first).mediaSubType.rawValue
+        #expect(codec == kCMVideoCodecType_AppleProRes422HQ || codec == kCMVideoCodecType_HEVC)
+    }
+
+    @Test func movieExportCancellationRemovesPartialFileAndThrows() async throws {
+        let source = RGBAF16Image(srgb8: [UInt8](repeating: 128, count: 64 * 64 * 4), width: 64, height: 64)
+        let task = Task {
+            try await MovieExporter.export(
+                source: source, adjustment: OklabAdjustment(), settings: MovieExporter.Settings(frameCount: 5000)
+            )
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+    }
+
+    @Test func movieExportRejectsTinyImages() async {
+        let source = RGBAF16Image(width: 1, height: 1, pixels: [0, 0, 0, 1])
+        await #expect(throws: MovieExporter.ExportError.self) {
+            try await MovieExporter.export(source: source, adjustment: OklabAdjustment())
+        }
     }
 
     @Test func animationCoversFullRotationInTenSeconds() {
