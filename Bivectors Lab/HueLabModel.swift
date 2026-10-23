@@ -25,7 +25,8 @@ final class HueLabModel {
     @ObservationIgnored private var fullSource: RGBAF16Image?
     /// ~1 MP source used for live preview while dragging.
     @ObservationIgnored private var previewSource: RGBAF16Image?
-    @ObservationIgnored private var renderTask: Task<Void, Never>?
+    @ObservationIgnored private var isRendering = false
+    @ObservationIgnored private var renderPending = false
 
     private static let previewDimension = 1024
     private static let fullDimension = 4096
@@ -57,20 +58,31 @@ final class HueLabModel {
     }
 
     /// Call whenever `adjustment` changes: invalidates any restore and re-renders the preview.
+    ///
+    /// Renders are coalesced: only one runs at a time, and when it finishes it re-renders if the
+    /// adjustment moved in the meantime, so dragging never queues up stale work.
     func adjustmentChanged() {
         restoredImage = nil
         restoreStats = nil
-        renderTask?.cancel()
-        guard let preview = previewSource else { return }
-        let adjustment = adjustment
-        renderTask = Task {
+        renderPending = true
+        guard !isRendering else { return }
+        isRendering = true
+        Task {
+            await renderLoop()
+        }
+    }
+
+    private func renderLoop() async {
+        while renderPending, let preview = previewSource {
+            renderPending = false
+            let adjustment = adjustment
             let result = await Task.detached(priority: .userInitiated) {
                 OklabRotor.apply(adjustment, to: preview)
             }.value
-            guard !Task.isCancelled else { return }
             adjustedImage = result.image.makeCGImage()
             outOfGamut = result.outOfGamut
         }
+        isRendering = false
     }
 
     /// Applies the adjustment to the full-res float image, then its inverse, and compares with the original.
