@@ -141,6 +141,8 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             scaleSlider("Lightness scale", value: $model.adjustment.lightnessScale)
             scaleSlider("Chroma scale", value: $model.adjustment.chromaScale)
+            Toggle("Preserve luminance", isOn: $model.adjustment.preserveLuminance)
+                .help("Hold each pixel's luminance Y at its original value (× lightness scale³) after the hue / chroma change")
         }
         .frame(minWidth: 220, maxWidth: 320)
     }
@@ -149,7 +151,7 @@ struct ContentView: View {
     private var infoColumn: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button("Reset", systemImage: "arrow.counterclockwise") {
-                model.adjustment = OklabAdjustment()
+                model.adjustment.resetValues()
             }
             .disabled(model.adjustment.isIdentity)
 
@@ -185,6 +187,8 @@ struct ContentView: View {
             Text("Stored metadata")
                 .font(.headline)
             Text("Δθ = \(model.adjustment.deltaThetaDegrees, specifier: "%.2f")°   L × \(model.adjustment.lightnessScale, specifier: "%.2f")   C × \(model.adjustment.chromaScale, specifier: "%.2f")")
+                .font(.callout.monospacedDigit())
+            Text("Mean luminance Y: \(model.originalMeanLuminance, specifier: "%.4f") → \(model.adjustedMeanLuminance, specifier: "%.4f")")
                 .font(.callout.monospacedDigit())
             Text("Pixels outside sRGB gamut (preserved, preview): \(model.outOfGamut)")
                 .font(.callout.monospacedDigit())

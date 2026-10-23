@@ -11,7 +11,26 @@
     ],
   },
   "files": [
-    { "kind": "folder", "path": "Bivectors Lab", "target-membership": [ "Bivectors Lab" ] },
+    {
+      "kind": "folder",
+      "path": "Bivectors Lab",
+      "target-membership": [
+        "Bivectors Lab",
+      ],
+      "membership-exceptions": [
+        {
+          "target": "Bivectors LabTests",
+          "inclusions": [
+            "Sunflower2.jpg",
+          ],
+        }, {
+          "target": "Bivectors LabUITests",
+          "inclusions": [
+            "Sunflower2.jpg",
+          ],
+        },
+      ],
+    },
     { "kind": "folder", "path": "Bivectors LabTests", "target-membership": [ "Bivectors LabTests" ] },
     { "kind": "folder", "path": "Bivectors LabUITests", "target-membership": [ "Bivectors LabUITests" ] },
     {

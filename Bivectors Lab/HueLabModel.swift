@@ -17,6 +17,9 @@ final class HueLabModel {
     private(set) var adjustedImage: CGImage?
     private(set) var restoredImage: CGImage?
     private(set) var outOfGamut = 0
+    /// Mean luminance Y (linear light) of the preview before and after the adjustment.
+    private(set) var originalMeanLuminance = 0.0
+    private(set) var adjustedMeanLuminance = 0.0
     private(set) var restoreStats: RestoreStats?
     private(set) var isRestoring = false
     private(set) var errorMessage: String?
@@ -43,7 +46,8 @@ final class HueLabModel {
         fullSource = full
         previewSource = preview
         originalImage = preview.makeCGImage()
-        adjustment = OklabAdjustment()
+        originalMeanLuminance = OklabRotor.meanLuminance(of: preview)
+        adjustment.resetValues()
         adjustmentChanged()
     }
 
@@ -76,11 +80,13 @@ final class HueLabModel {
         while renderPending, let preview = previewSource {
             renderPending = false
             let adjustment = adjustment
-            let result = await Task.detached(priority: .userInitiated) {
-                OklabRotor.apply(adjustment, to: preview)
+            let (result, meanY) = await Task.detached(priority: .userInitiated) {
+                let result = OklabRotor.apply(adjustment, to: preview)
+                return (result, OklabRotor.meanLuminance(of: result.image))
             }.value
             adjustedImage = result.image.makeCGImage()
             outOfGamut = result.outOfGamut
+            adjustedMeanLuminance = meanY
         }
         isRendering = false
     }

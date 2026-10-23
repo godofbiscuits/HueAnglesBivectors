@@ -22,20 +22,42 @@ struct OklabAdjustment: Equatable, Sendable {
     var deltaThetaDegrees: Double = 0
     var lightnessScale: Double = 1
     var chromaScale: Double = 1
+    /// When true, each pixel's luminance Y is held at its original value (times `lightnessScale`³,
+    /// which is how a lightness scale acts on a gray) after the hue / chroma change.
+    var preserveLuminance = false
+    /// True for the adjustment returned by `inverse` when `preserveLuminance` is on. The luminance-preserving
+    /// map isn't a forward map with different parameters, so the inverse is the same numbers run backwards.
+    var isInverse = false
 
     static let scaleRange: ClosedRange<Double> = 0.5...1.5
 
-    /// The adjustment that undoes this one: -Δθ, 1/sL, 1/sC.
-    /// Scales are clamped away from zero so the inverse always exists.
+    /// The adjustment that undoes this one.
+    /// Plain mode: -Δθ, 1/sL, 1/sC (scales are clamped away from zero so the inverse always exists).
+    /// Luminance-preserving mode: the same Δθ, sL, sC with the direction flipped.
     var inverse: OklabAdjustment {
-        OklabAdjustment(
+        if preserveLuminance {
+            var flipped = self
+            flipped.isInverse.toggle()
+            return flipped
+        }
+        return OklabAdjustment(
             deltaThetaDegrees: -deltaThetaDegrees,
             lightnessScale: 1 / max(lightnessScale, 1e-6),
             chromaScale: 1 / max(chromaScale, 1e-6)
         )
     }
 
-    var isIdentity: Bool { self == OklabAdjustment() }
+    /// True when the three dial values are at their defaults (the luminance toggle doesn't count).
+    var isIdentity: Bool {
+        deltaThetaDegrees == 0 && lightnessScale == 1 && chromaScale == 1
+    }
+
+    /// Resets the dial values but keeps the luminance-preservation setting.
+    mutating func resetValues() {
+        deltaThetaDegrees = 0
+        lightnessScale = 1
+        chromaScale = 1
+    }
 }
 
 /// Precomputed rotor `R(θ) = cos θ + sin θ · e₁₂` (acting on the a,b plane) plus scales.
@@ -44,6 +66,11 @@ struct OklabRotorTransform: Sendable {
     let sinTheta: Float
     let lightnessScale: Float
     let chromaScale: Float
+    let preserveLuminance: Bool
+    let isInverse: Bool
+
+    /// Luminances at or below this are treated as black and left unscaled.
+    private static let luminanceFloor: Float = 1e-6
 
     init(_ adjustment: OklabAdjustment) {
         let theta = adjustment.deltaThetaDegrees * .pi / 180
@@ -51,14 +78,61 @@ struct OklabRotorTransform: Sendable {
         sinTheta = Float(sin(theta))
         lightnessScale = Float(adjustment.lightnessScale)
         chromaScale = Float(adjustment.chromaScale)
+        preserveLuminance = adjustment.preserveLuminance
+        isInverse = adjustment.isInverse
     }
 
-    /// Applies the adjustment to an Oklab triple (L, a, b).
+    /// Rotates (a, b) by Δθ and scales it by the chroma factor; L is untouched.
     @inline(__always)
-    func apply(_ lab: SIMD3<Float>) -> SIMD3<Float> {
+    private func rotateAndScaleChroma(_ lab: SIMD3<Float>) -> SIMD3<Float> {
         let a = lab.y * cosTheta - lab.z * sinTheta
         let b = lab.y * sinTheta + lab.z * cosTheta
-        return SIMD3(lab.x * lightnessScale, a * chromaScale, b * chromaScale)
+        return SIMD3(lab.x, a * chromaScale, b * chromaScale)
+    }
+
+    /// Exact inverse of `rotateAndScaleChroma`.
+    @inline(__always)
+    private func unrotateAndUnscaleChroma(_ lab: SIMD3<Float>) -> SIMD3<Float> {
+        let a = lab.y * cosTheta + lab.z * sinTheta
+        let b = -lab.y * sinTheta + lab.z * cosTheta
+        return SIMD3(lab.x, a / chromaScale, b / chromaScale)
+    }
+
+    /// Applies the plain adjustment (rotation, chroma scale, lightness scale) to an Oklab triple (L, a, b).
+    @inline(__always)
+    func apply(_ lab: SIMD3<Float>) -> SIMD3<Float> {
+        var result = rotateAndScaleChroma(lab)
+        result.x *= lightnessScale
+        return result
+    }
+
+    /// Applies the whole adjustment to one pixel in (unpremultiplied) linear sRGB.
+    ///
+    /// Luminance-preserving mode: scaling linear RGB by k scales Oklab (L, a, b) by k^(1/3) and Y by k, so after
+    /// rotating we rescale linear RGB to put Y back at `Y₀ · sL³`. The inverse has a closed form: un-rotate to get
+    /// v = k^(1/3)·lab(c), then k = Y(lin(v)) · sL³ / Y(x) and lab(c) = v / k^(1/3).
+    @inline(__always)
+    func apply(linear c: SIMD3<Float>) -> SIMD3<Float> {
+        guard preserveLuminance else {
+            return OklabRotor.oklabToLinear(apply(OklabRotor.linearToOklab(c)))
+        }
+        let lightnessCubed = lightnessScale * lightnessScale * lightnessScale
+
+        if !isInverse {
+            let y0 = OklabRotor.luminance(c)
+            let rotated = OklabRotor.oklabToLinear(rotateAndScaleChroma(OklabRotor.linearToOklab(c)))
+            let y1 = OklabRotor.luminance(rotated)
+            guard y0 > Self.luminanceFloor, y1 > Self.luminanceFloor else { return rotated }
+            return rotated * (y0 * lightnessCubed / y1)
+        }
+
+        let yx = OklabRotor.luminance(c)
+        let v = unrotateAndUnscaleChroma(OklabRotor.linearToOklab(c))
+        let unscaled = OklabRotor.oklabToLinear(v)
+        let yv = OklabRotor.luminance(unscaled)
+        guard yx > Self.luminanceFloor, yv > Self.luminanceFloor else { return unscaled }
+        let k = yv * lightnessCubed / yx
+        return OklabRotor.oklabToLinear(v / cbrtf(k))
     }
 }
 
@@ -207,6 +281,23 @@ enum OklabRotor {
         )
     }
 
+    /// Relative luminance Y of a linear sRGB color.
+    @inline(__always)
+    static func luminance(_ linear: SIMD3<Float>) -> Float {
+        0.2126 * linear.x + 0.7152 * linear.y + 0.0722 * linear.z
+    }
+
+    /// Mean luminance Y over the image (premultiplied, so translucent pixels contribute proportionally).
+    static func meanLuminance(of image: RGBAF16Image) -> Double {
+        let count = image.width * image.height
+        guard count > 0 else { return 0 }
+        var total: Double = 0
+        for i in stride(from: 0, to: image.pixels.count, by: 4) {
+            total += Double(luminance(SIMD3(Float(image.pixels[i]), Float(image.pixels[i + 1]), Float(image.pixels[i + 2]))))
+        }
+        return total / Double(count)
+    }
+
     /// True if every linear component lies within 0...1 (allowing a small tolerance).
     @inline(__always)
     static func isInSRGBGamut(_ linear: SIMD3<Float>) -> Bool {
@@ -261,7 +352,7 @@ enum OklabRotor {
                         var linear = SIMD3(Float(pixels[i]), Float(pixels[i + 1]), Float(pixels[i + 2]))
                         if alpha < 1 { linear /= alpha }
 
-                        var result = oklabToLinear(transform.apply(linearToOklab(linear)))
+                        var result = transform.apply(linear: linear)
                         if !isInSRGBGamut(result) { rowOutOfGamut += 1 }
                         if alpha < 1 { result *= alpha }
 
