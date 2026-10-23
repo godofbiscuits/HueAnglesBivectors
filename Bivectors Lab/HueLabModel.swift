@@ -14,8 +14,8 @@ final class HueLabModel {
     var adjustment = OklabAdjustment()
 
     private(set) var originalImage: CGImage?
-    /// Per-pixel difference between the plain hue-altered image (luminance drifts with hue) and the
-    /// luminance-preserving one, amplified by `diffGain`. Black means identical.
+    /// Per-pixel luminance (grayscale) difference between the plain hue-altered image (luminance drifts with hue)
+    /// and the luminance-preserving one, amplified by `diffGain`. Black means identical.
     private(set) var diffImage: CGImage?
     /// Max / mean of that difference in gamma-encoded 8-bit units (0...255), before gain.
     private(set) var diffMaxError = 0.0

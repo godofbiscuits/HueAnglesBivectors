@@ -107,8 +107,8 @@ struct ContentView: View {
     @ViewBuilder
     private var imagePanes: some View {
         pane("Original", image: model.originalImage)
-        pane("Diff ×\(Int(model.diffGain)): hue-altered vs preserved", image: model.diffImage)
         pane("Hue-altered, luminance preserved", image: model.preservedImage)
+        pane("Luminance diff ×\(Int(model.diffGain)): hue-altered vs preserved", image: model.diffImage)
         if let restored = model.restoredImage {
             pane("Restored: hue-altered", image: restored)
         }
@@ -213,7 +213,7 @@ struct ContentView: View {
                 .font(.callout.monospacedDigit())
             Text("  hue-altered \(model.adjustedMeanLuminance, specifier: "%.4f"), luminance preserved \(model.preservedMeanLuminance, specifier: "%.4f")")
                 .font(.callout.monospacedDigit())
-            Text("Diff, hue-altered vs preserved: max \(model.diffMaxError, specifier: "%.2f"), mean \(model.diffMeanError, specifier: "%.3f") (8-bit units)")
+            Text("Luminance diff, hue-altered vs preserved: max \(model.diffMaxError, specifier: "%.2f"), mean \(model.diffMeanError, specifier: "%.3f") (8-bit units)")
                 .font(.callout.monospacedDigit())
             Text("Outside sRGB gamut (kept): \(model.outOfGamut) hue-altered, \(model.preservedOutOfGamut) preserved")
                 .font(.callout.monospacedDigit())

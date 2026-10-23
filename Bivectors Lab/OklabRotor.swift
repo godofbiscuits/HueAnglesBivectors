@@ -389,11 +389,12 @@ enum OklabRotor {
         return (Double(maxError), total / Double(count))
     }
 
-    /// Per-pixel, per-channel absolute difference between two same-sized images, as a displayable image
+    /// Per-pixel absolute *luminance* difference between two same-sized images, as a displayable grayscale image
     /// (opaque; black = identical) plus the max / mean difference in gamma-encoded 8-bit units (0...255).
     ///
-    /// The difference is taken on gamma-encoded values (what a viewer perceives), multiplied by `gain`,
-    /// clamped to 0...1, and stored as linear light so it displays at that encoded brightness.
+    /// Each pixel's luminance Y is gamma-encoded (what a viewer perceives), the two are subtracted, and the
+    /// result is multiplied by `gain`, clamped to 0...1, and stored as linear light so it displays at that
+    /// encoded brightness. Color differences at equal luminance therefore show as black.
     static func differenceMap(_ a: RGBAF16Image, _ b: RGBAF16Image, gain: Float) -> DifferenceMap {
         let width = a.width, height = a.height
         guard b.width == width, b.height == height, width > 0, height > 0 else {
@@ -417,12 +418,15 @@ enum OklabRotor {
                                 var rowTotal: Double = 0
                                 for x in 0..<width {
                                     let i = (y * width + x) * 4
-                                    for c in 0..<3 {
-                                        let d = abs(srgbEncodeExtended(Float(pa[i + c])) - srgbEncodeExtended(Float(pb[i + c])))
-                                        rowMaximum = max(rowMaximum, d * 255)
-                                        rowTotal += Double(d * 255)
-                                        po[i + c] = Float16(srgbDecode(min(d * gain, 1)))
-                                    }
+                                    let ya = luminance(SIMD3(Float(pa[i]), Float(pa[i + 1]), Float(pa[i + 2])))
+                                    let yb = luminance(SIMD3(Float(pb[i]), Float(pb[i + 1]), Float(pb[i + 2])))
+                                    let d = abs(srgbEncodeExtended(ya) - srgbEncodeExtended(yb))
+                                    rowMaximum = max(rowMaximum, d * 255)
+                                    rowTotal += Double(d * 255)
+                                    let shown = Float16(srgbDecode(min(d * gain, 1)))
+                                    po[i] = shown
+                                    po[i + 1] = shown
+                                    po[i + 2] = shown
                                 }
                                 maxes[y] = rowMaximum
                                 sums[y] = rowTotal
@@ -436,14 +440,14 @@ enum OklabRotor {
         return DifferenceMap(
             image: RGBAF16Image(width: width, height: height, pixels: output),
             maxError: Double(rowMax.max() ?? 0),
-            meanError: rowSum.reduce(0, +) / Double(width * height * 3)
+            meanError: rowSum.reduce(0, +) / Double(width * height)
         )
     }
 }
 
 struct DifferenceMap: Sendable {
     let image: RGBAF16Image
-    /// Maximum / mean absolute per-channel difference, in gamma-encoded 8-bit units (0...255).
+    /// Maximum / mean absolute luminance difference, in gamma-encoded 8-bit units (0...255).
     let maxError: Double
     let meanError: Double
 }

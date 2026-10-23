@@ -232,9 +232,20 @@ struct Bivectors_LabTests {
         let expected = OklabRotor.srgbDecode(10.0 / 255 * 2)
         #expect(abs(Float(weak.image.pixels[0]) - expected) < 0.05 * expected)
 
+        // Luminance only: all three channels of the output carry the same gray value.
+        #expect(weak.image.pixels[0] == weak.image.pixels[1] && weak.image.pixels[1] == weak.image.pixels[2])
+
         // Large gain saturates to white.
         let strong = OklabRotor.differenceMap(a, b, gain: 64)
         #expect(strong.image.pixels[0] == 1)
+    }
+
+    @Test func differenceMapIgnoresColorAtEqualLuminance() {
+        // A gray and a pure (out-of-gamut) red with the same luminance Y = 0.5 differ in color but not luminance.
+        let gray = RGBAF16Image(width: 1, height: 1, pixels: [0.5, 0.5, 0.5, 1])
+        let red = RGBAF16Image(width: 1, height: 1, pixels: [Float16(0.5 / 0.2126), 0, 0, 1])
+        let map = OklabRotor.differenceMap(gray, red, gain: 16)
+        #expect(map.maxError < 0.2)
     }
 
     @Test func plainAndLuminancePreservedVariantsDiffer() {
