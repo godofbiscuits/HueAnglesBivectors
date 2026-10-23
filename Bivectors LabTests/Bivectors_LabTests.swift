@@ -131,6 +131,28 @@ struct Bivectors_LabTests {
         await #expect(throws: CancellationError.self) { try await task.value }
     }
 
+    @Test func movieExportRendersOffTheMainThread() async throws {
+        // Regression: the project defaults to the main actor, which once made the exporter render all 360 frames
+        // on the main thread and freeze the UI. Progress callbacks run on the exporter's own executor.
+        final class Flag: @unchecked Sendable { var sawMainThread = false; var calls = 0 }
+        let flag = Flag()
+        let source = RGBAF16Image(srgb8: [UInt8](repeating: 128, count: 64 * 64 * 4), width: 64, height: 64)
+        // Start from the main actor, like the app's Movie button does.
+        let url = try await MainActor.run {
+            Task { @MainActor in
+                try await MovieExporter.export(
+                    source: source, adjustment: OklabAdjustment(), settings: MovieExporter.Settings(frameCount: 4)
+                ) { _ in
+                    flag.calls += 1
+                    if Thread.isMainThread { flag.sawMainThread = true }
+                }
+            }
+        }.value
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(flag.calls == 4)
+        #expect(!flag.sawMainThread)
+    }
+
     @Test func movieExportRejectsTinyImages() async {
         let source = RGBAF16Image(width: 1, height: 1, pixels: [0, 0, 0, 1])
         await #expect(throws: MovieExporter.ExportError.self) {

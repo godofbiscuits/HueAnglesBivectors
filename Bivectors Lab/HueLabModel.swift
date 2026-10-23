@@ -49,8 +49,8 @@ final class HueLabModel {
     @ObservationIgnored private var isDiffing = false
     @ObservationIgnored private var diffPending = false
 
-    private static let previewDimension = 1024
-    private static let fullDimension = 4096
+    nonisolated private static let previewDimension = 1024
+    nonisolated private static let fullDimension = 4096
 
     // MARK: Animation
 

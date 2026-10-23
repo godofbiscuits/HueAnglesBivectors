@@ -11,7 +11,9 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 
-enum MovieExporter {
+/// The project defaults every type to the main actor, so this is explicitly `nonisolated`, and `export` is
+/// `@concurrent`: rendering 360 frames must never run on (and freeze) the main thread.
+nonisolated enum MovieExporter {
     struct Settings: Sendable {
         /// 360 frames at one degree each is one full rotation.
         var frameCount = 360
@@ -42,7 +44,7 @@ enum MovieExporter {
     ///
     /// Frame `n` uses hue angle `adjustment.deltaThetaDegrees + n · degreesPerFrame`; the adjustment's lightness
     /// and chroma scales are held constant. `progress` is called with 0...1 as frames are written.
-    static func export(
+    @concurrent static func export(
         source: RGBAF16Image,
         adjustment: OklabAdjustment,
         settings: Settings = Settings(),

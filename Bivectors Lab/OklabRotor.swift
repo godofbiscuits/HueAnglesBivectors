@@ -17,7 +17,7 @@ import CoreGraphics
 // MARK: - Adjustment metadata
 
 /// The complete restoration metadata: hue rotation plus lightness / chroma scale.
-struct OklabAdjustment: Equatable, Sendable {
+nonisolated struct OklabAdjustment: Equatable, Sendable {
     /// Rotation of the (a, b) plane in degrees (counter-clockwise, a toward b).
     var deltaThetaDegrees: Double = 0
     var lightnessScale: Double = 1
@@ -61,7 +61,7 @@ struct OklabAdjustment: Equatable, Sendable {
 }
 
 /// Precomputed rotor `R(θ) = cos θ + sin θ · e₁₂` (acting on the a,b plane) plus scales.
-struct OklabRotorTransform: Sendable {
+nonisolated struct OklabRotorTransform: Sendable {
     let cosTheta: Float
     let sinTheta: Float
     let lightnessScale: Float
@@ -139,7 +139,7 @@ struct OklabRotorTransform: Sendable {
 // MARK: - Pixel buffer
 
 /// 16-bit float, premultiplied-alpha RGBA in extended linear sRGB. Component values are not limited to 0...1.
-struct RGBAF16Image: Sendable {
+nonisolated struct RGBAF16Image: Sendable {
     let width: Int
     let height: Int
     var pixels: [Float16]
@@ -218,13 +218,13 @@ struct RGBAF16Image: Sendable {
     }
 }
 
-struct AdjustmentResult: Sendable {
+nonisolated struct AdjustmentResult: Sendable {
     let image: RGBAF16Image
     /// Pixels whose adjusted color lies outside the sRGB gamut. They are preserved, not clamped.
     let outOfGamut: Int
 }
 
-struct RestoreStats: Sendable, Equatable {
+nonisolated struct RestoreStats: Sendable, Equatable {
     /// Maximum / mean absolute difference per RGB channel, in gamma-encoded 8-bit units (0...255).
     let maxError: Double
     let meanError: Double
@@ -234,7 +234,7 @@ struct RestoreStats: Sendable, Equatable {
 
 // MARK: - Color math
 
-enum OklabRotor {
+nonisolated enum OklabRotor {
     // MARK: sRGB transfer
 
     @inline(__always)
@@ -445,7 +445,7 @@ enum OklabRotor {
     }
 }
 
-struct DifferenceMap: Sendable {
+nonisolated struct DifferenceMap: Sendable {
     let image: RGBAF16Image
     /// Maximum / mean absolute luminance difference, in gamma-encoded 8-bit units (0...255).
     let maxError: Double
